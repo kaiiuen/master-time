@@ -1,0 +1,12 @@
+[package]
+name = "master-time"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "master_time"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 2
+lto = true
