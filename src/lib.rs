@@ -4,3 +4,10 @@ pub mod measurement;
 pub mod ntp;
 pub mod servers;
 pub mod transport;
+
+pub mod service;
+
+pub use service::{
+    MeasurementResult, NtpMeasurementService, ServiceError, assemble_result, measure,
+    system_time_to_ntp_timestamp,
+};
