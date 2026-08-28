@@ -9,6 +9,20 @@
 //! NTS-KE exchange, negotiated AEAD keys, cookies, authenticated NTP extension
 //! fields, and replay protection. None of those operations are implemented in
 //! this crate, and plain UDP must never be reported as an NTS result.
+//!
+//! ## Dependency review (2026-08-28)
+//!
+//! The crates.io candidates reviewed were `rtime-nts` 0.15.0, `rusty_time-nts`
+//! 0.1.7, `rkik-nts` 1.2.0, and `ntp_usg-client` 5.0.0. They advertise RFC
+//! 8915 coverage, but none is accepted here as a mature compatible dependency:
+//! `rtime-nts` and `rusty_time-nts` were published in 2026 and have very low
+//! download counts (124 and 101 total); `rkik-nts` is newer (created in 2025)
+//! with 20,603 total downloads. `ntp_usg-client` is a larger
+//! general client whose NTS API/runtime and Rust 1.93 requirement do not match
+//! this synchronous, existing transport boundary. `rtime-nts` also targets a
+//! different daemon, and `rusty_time-nts` requires Rust 1.95. These signals are
+//! insufficient for importing security-sensitive protocol code without a
+//! dedicated review and interoperability test plan.
 
 use std::fmt;
 use std::str::FromStr;

@@ -93,6 +93,9 @@ impl std::error::Error for NtsTransportConfigError {}
 /// Why this boundary cannot execute a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NtsTransportError {
+    /// The opt-in boundary feature is disabled, so no NTS operation is
+    /// attempted.
+    FeatureDisabled,
     /// NTS-KE, AEAD packet protection, cookies, authenticated extension
     /// fields, and replay protection are intentionally not implemented here.
     NotImplemented,
@@ -103,6 +106,9 @@ pub enum NtsTransportError {
 impl fmt::Display for NtsTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FeatureDisabled => f.write_str(
+                "NTS boundary is disabled; enabling the nts-boundary feature still does not provide NTS",
+            ),
             Self::NotImplemented => f.write_str("NTS transport is not implemented"),
             Self::Unsupported(policy) => policy.fmt(f),
         }
@@ -150,6 +156,9 @@ impl NtsTransportBoundary {
     /// Refuse execution explicitly; this method never performs plain UDP or
     /// unauthenticated NTS-like traffic. In particular, it does not send the
     /// request to the NTS-KE endpoint or silently downgrade an NTS policy.
+    ///
+    /// The `nts-boundary` feature only opts into this explicit refusal path. It
+    /// is not an NTS implementation and must not be enabled as a security claim.
     pub fn execute(
         &self,
         config: &NtsTransportConfig,
@@ -159,7 +168,16 @@ impl NtsTransportBoundary {
             EndpointSecurityStatus::PlainUdpSupported => Err(NtsTransportError::Unsupported(
                 UnsupportedNtsPolicy::PlainUdp,
             )),
-            EndpointSecurityStatus::NtsUnsupported => Err(NtsTransportError::NotImplemented),
+            EndpointSecurityStatus::NtsUnsupported => {
+                #[cfg(not(feature = "nts-boundary"))]
+                {
+                    Err(NtsTransportError::FeatureDisabled)
+                }
+                #[cfg(feature = "nts-boundary")]
+                {
+                    Err(NtsTransportError::NotImplemented)
+                }
+            }
             EndpointSecurityStatus::InvalidEndpoint => {
                 // NtsTransportConfig owns a validated endpoint, so this arm
                 // documents the capability contract if that type grows later.
@@ -227,12 +245,23 @@ mod tests {
         ] {
             let configuration = config(mode);
             let result = NtsTransportBoundary::new().execute(&configuration, &[0; 48]);
+            #[cfg(feature = "nts-boundary")]
             assert_eq!(result, Err(NtsTransportError::NotImplemented));
+            #[cfg(not(feature = "nts-boundary"))]
+            assert_eq!(result, Err(NtsTransportError::FeatureDisabled));
             assert_eq!(
                 configuration.unsupported_nts_features().len(),
                 5,
                 "NTS must not be reported as partially implemented"
             );
         }
+    }
+
+    #[cfg(not(feature = "nts-boundary"))]
+    #[test]
+    fn default_build_disables_even_the_unsupported_execution_boundary() {
+        let result = NtsTransportBoundary::new()
+            .execute(&config(EndpointSecurityMode::NtsRequired), &[0; 48]);
+        assert_eq!(result, Err(NtsTransportError::FeatureDisabled));
     }
 }

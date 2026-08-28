@@ -7,11 +7,18 @@ edition = "2024"
 name = "master_time"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Opts into the NTS transport boundary only. This does not enable NTS-KE,
+# TLS, AEAD, cookies, authenticated extension fields, or replay protection.
+# It exists so a future vetted backend can be added without silently changing
+# the default security posture.
+nts-boundary = []
+
 [dependencies]
 eframe = "0.29"
-# No NTS dependency is declared: this crate does not claim NTS support until
-# a mature implementation covers RFC 8915 end to end. Plain UDP remains
-# provided by the existing transport without authentication.
+# Deliberately no NTS dependency: the candidates reviewed on 2026-08-28 do not
+# meet this application's maturity and compatibility bar. See src/nts.rs.
 
 [profile.release]
 opt-level = 2
