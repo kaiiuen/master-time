@@ -21,3 +21,7 @@ pub mod config;
 pub use config::{
     AppConfig, ConfigError, PollingPreferences, ServerProfile as ConfigServerProfile,
 };
+
+pub mod platform;
+
+pub use platform::{DiagnosticsCollector, DiagnosticsSnapshot, collect_diagnostics};
