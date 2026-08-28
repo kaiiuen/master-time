@@ -56,9 +56,14 @@ pub use settings::{Language, LocalSettings, SettingsDraft, SettingsError, Settin
 
 pub mod storage;
 pub mod sync_policy;
+pub mod time_action;
 
 pub use storage::{StorageError, load, load_config, save, save_config};
 pub use sync_policy::{DEFAULT_MAX_CORRECTION_OFFSET, SyncDisposition, SyncPolicy};
+pub use time_action::{
+    ApprovedCorrection, CorrectionPreview, CorrectionRefusal, CorrectionRequest, CorrectionResult,
+    TimeAction,
+};
 
 pub mod localization;
 
