@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows binary
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-time-windows
+          path: target/release/master-time.exe
+          if-no-files-found: error
