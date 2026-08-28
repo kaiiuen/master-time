@@ -11,3 +11,7 @@ pub use service::{
     MeasurementResult, NtpMeasurementService, ServiceError, assemble_result, measure,
     system_time_to_ntp_timestamp,
 };
+
+pub mod health;
+
+pub use health::{HealthInput, HealthStatus, LeapIndicator, evaluate};
