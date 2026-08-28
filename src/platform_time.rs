@@ -133,6 +133,45 @@ fn validate(correction: ApprovedCorrection) -> Result<(), PlatformTimeError> {
     }
 }
 
+const FILETIME_TICKS_PER_SECOND: f64 = 10_000_000.0;
+// The largest FILETIME that can be converted to SYSTEMTIME (year 9999).
+const MAX_SYSTEMTIME_FILETIME_TICKS: u64 = 2_650_467_743_999_999_999;
+
+/// Adds a correction expressed in seconds to a UTC FILETIME tick count.
+///
+/// FILETIME is an unsigned count of 100-nanosecond intervals since 1601-01-01
+/// UTC. Keep the conversion checked: Rust's float-to-integer casts saturate,
+/// which would otherwise turn an unrepresentable correction into a valid but
+/// incorrect timestamp.
+fn adjusted_file_time_ticks(
+    current_ticks: u64,
+    offset_seconds: f64,
+) -> Result<u64, PlatformTimeError> {
+    if !offset_seconds.is_finite() {
+        return Err(PlatformTimeError::InvalidCorrection);
+    }
+
+    let offset_ticks = offset_seconds * FILETIME_TICKS_PER_SECOND;
+    if !offset_ticks.is_finite() || offset_ticks.abs() > u64::MAX as f64 {
+        return Err(PlatformTimeError::InvalidCorrection);
+    }
+
+    // The range check above keeps this cast well inside i128's range. Truncate
+    // sub-tick precision deterministically; SYSTEMTIME itself has milliseconds
+    // as its finest documented resolution.
+    let offset_ticks = offset_ticks.trunc() as i128;
+    let target_ticks = i128::from(current_ticks)
+        .checked_add(offset_ticks)
+        .and_then(|ticks| u64::try_from(ticks).ok())
+        .ok_or(PlatformTimeError::InvalidCorrection)?;
+
+    if target_ticks > MAX_SYSTEMTIME_FILETIME_TICKS {
+        Err(PlatformTimeError::InvalidCorrection)
+    } else {
+        Ok(target_ticks)
+    }
+}
+
 #[cfg(not(windows))]
 mod platform {
     use super::*;
@@ -147,7 +186,6 @@ mod platform {
     use super::*;
     const ERROR_ACCESS_DENIED: u32 = 5;
     const ERROR_PRIVILEGE_NOT_HELD: u32 = 1_314;
-    const FILETIME_TICKS_PER_SECOND: f64 = 10_000_000.0;
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -198,7 +236,7 @@ mod platform {
         }
 
         let current_ticks = file_time_ticks(current_file_time);
-        let target_ticks = adjusted_file_time_ticks(current_ticks, correction.offset)?;
+        let target_ticks = super::adjusted_file_time_ticks(current_ticks, correction.offset)?;
         let target_file_time = WindowsFileTime {
             low_date_time: target_ticks as u32,
             high_date_time: (target_ticks >> 32) as u32,
@@ -228,24 +266,6 @@ mod platform {
 
     fn file_time_ticks(file_time: WindowsFileTime) -> u64 {
         (u64::from(file_time.high_date_time) << 32) | u64::from(file_time.low_date_time)
-    }
-
-    fn adjusted_file_time_ticks(
-        current_ticks: u64,
-        offset_seconds: f64,
-    ) -> Result<u64, PlatformTimeError> {
-        if !offset_seconds.is_finite() {
-            return Err(PlatformTimeError::InvalidCorrection);
-        }
-
-        // FILETIME has 100-nanosecond resolution. Truncation matches the
-        // millisecond resolution of SYSTEMTIME while keeping the adjustment
-        // deterministic for fractional corrections.
-        let offset_ticks = (offset_seconds * FILETIME_TICKS_PER_SECOND).trunc() as i128;
-        let target_ticks = i128::from(current_ticks)
-            .checked_add(offset_ticks)
-            .ok_or(PlatformTimeError::InvalidCorrection)?;
-        u64::try_from(target_ticks).map_err(|_| PlatformTimeError::InvalidCorrection)
     }
 }
 
@@ -290,6 +310,34 @@ mod tests {
                 Err(PlatformTimeError::InvalidCorrection)
             );
         }
+    }
+
+    #[test]
+    fn filetime_adjustment_is_checked_and_deterministic() {
+        assert_eq!(
+            super::adjusted_file_time_ticks(1_000_000, 0.25),
+            Ok(3_500_000)
+        );
+        assert_eq!(
+            super::adjusted_file_time_ticks(1_000_000, -0.10000001),
+            Ok(0)
+        );
+        assert_eq!(
+            super::adjusted_file_time_ticks(0, -0.0000001),
+            Err(PlatformTimeError::InvalidCorrection)
+        );
+        assert_eq!(
+            super::adjusted_file_time_ticks(super::MAX_SYSTEMTIME_FILETIME_TICKS, 0.0000001),
+            Err(PlatformTimeError::InvalidCorrection)
+        );
+        assert_eq!(
+            super::adjusted_file_time_ticks(u64::MAX, -0.0000001),
+            Err(PlatformTimeError::InvalidCorrection)
+        );
+        assert_eq!(
+            super::adjusted_file_time_ticks(0, f64::MAX),
+            Err(PlatformTimeError::InvalidCorrection)
+        );
     }
 
     #[cfg(not(windows))]
