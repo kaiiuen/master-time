@@ -29,3 +29,7 @@ pub use platform::{DiagnosticsCollector, DiagnosticsSnapshot, collect_diagnostic
 pub mod polling;
 
 pub use polling::{PollEvent, PollingError, PollingWorker};
+
+pub mod state;
+
+pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingState};
