@@ -55,8 +55,10 @@ pub use history_view::{ChartModel, NormalizedPoint, ValueRange};
 pub use settings::{Language, LocalSettings, SettingsDraft, SettingsError, SettingsModel, Theme};
 
 pub mod storage;
+pub mod sync_policy;
 
 pub use storage::{StorageError, load, load_config, save, save_config};
+pub use sync_policy::{DEFAULT_MAX_CORRECTION_OFFSET, SyncDisposition, SyncPolicy};
 
 pub mod localization;
 
