@@ -361,140 +361,199 @@ impl MasterTimeApp {
             .format();
         let mut preferences_changed = false;
 
-        ui.group(|ui| {
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.heading(WINDOW_TITLE);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(format!(
-                        "{} × {}",
-                        ui.ctx().screen_rect().width() as u32,
-                        ui.ctx().screen_rect().height() as u32
-                    ));
-                });
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(local_clock).size(36.0).strong());
-                ui.label(egui::RichText::new(format!("UTC {utc_clock}")).size(16.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(self.tr(Key::Theme));
-                            let mut theme = self.settings.draft().theme();
-                            egui::ComboBox::from_id_salt("header-theme")
-                                .selected_text(format!("{theme:?}"))
-                                .show_ui(ui, |ui| {
-                                    for value in [Theme::System, Theme::Light, Theme::Dark] {
-                                        if ui
-                                            .selectable_value(
-                                                &mut theme,
-                                                value,
-                                                format!("{value:?}"),
-                                            )
-                                            .changed()
-                                        {
-                                            self.settings.draft_mut().set_theme(value);
-                                            preferences_changed = true;
-                                        }
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(self.tr(Key::Language));
-                            let mut language = self.settings.draft().language();
-                            egui::ComboBox::from_id_salt("header-language")
-                                .selected_text(format!("{language:?}"))
-                                .show_ui(ui, |ui| {
-                                    for value in [
-                                        Language::English,
-                                        Language::SimplifiedChinese,
-                                        Language::TraditionalChinese,
-                                    ] {
-                                        if ui
-                                            .selectable_value(
-                                                &mut language,
-                                                value,
-                                                format!("{value:?}"),
-                                            )
-                                            .changed()
-                                        {
-                                            self.settings.draft_mut().set_language(value);
-                                            preferences_changed = true;
-                                        }
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Format");
-                            ui.selectable_value(
-                                &mut self.hour_format,
-                                HourFormat::TwentyFourHour,
-                                "24-hour",
-                            );
-                            ui.selectable_value(
-                                &mut self.hour_format,
-                                HourFormat::TwelveHour,
-                                "12-hour",
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Text size");
-                            for (zoom, label) in [(0.9, "Small"), (1.0, "Normal"), (1.15, "Large")]
-                            {
-                                ui.selectable_value(&mut self.text_zoom, zoom, label);
-                            }
-                        });
-                        let mut always_on_top = self.settings.draft().always_on_top();
-                        if ui
-                            .checkbox(&mut always_on_top, self.tr(Key::AlwaysOnTop))
-                            .changed()
-                        {
-                            self.settings.draft_mut().set_always_on_top(always_on_top);
-                            preferences_changed = true;
-                        }
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+            .show(ui, |ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.heading(WINDOW_TITLE);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(format!(
+                            "{} × {}",
+                            ui.ctx().screen_rect().width() as u32,
+                            ui.ctx().screen_rect().height() as u32
+                        ));
                     });
                 });
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let polling = self.worker.is_some();
-                if ui
-                    .add_enabled(!polling, egui::Button::new(self.tr(Key::StartPolling)))
-                    .clicked()
-                {
-                    self.start_polling();
-                }
-                if ui
-                    .add_enabled(polling, egui::Button::new(self.tr(Key::StopPolling)))
-                    .clicked()
-                {
-                    self.stop_polling();
-                }
-                ui.label(if polling {
-                    self.tr(Key::PollingActive)
-                } else {
-                    self.tr(Key::PollingStopped)
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(local_clock).size(36.0).strong());
+                    ui.label(egui::RichText::new(format!("UTC {utc_clock}")).size(16.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(self.tr(Key::Theme));
+                                let mut theme = self.settings.draft().theme();
+                                egui::ComboBox::from_id_salt("header-theme")
+                                    .selected_text(format!("{theme:?}"))
+                                    .show_ui(ui, |ui| {
+                                        for value in [Theme::System, Theme::Light, Theme::Dark] {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut theme,
+                                                    value,
+                                                    format!("{value:?}"),
+                                                )
+                                                .changed()
+                                            {
+                                                self.settings.draft_mut().set_theme(value);
+                                                preferences_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(self.tr(Key::Language));
+                                let mut language = self.settings.draft().language();
+                                egui::ComboBox::from_id_salt("header-language")
+                                    .selected_text(format!("{language:?}"))
+                                    .show_ui(ui, |ui| {
+                                        for value in [
+                                            Language::English,
+                                            Language::SimplifiedChinese,
+                                            Language::TraditionalChinese,
+                                        ] {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut language,
+                                                    value,
+                                                    format!("{value:?}"),
+                                                )
+                                                .changed()
+                                            {
+                                                self.settings.draft_mut().set_language(value);
+                                                preferences_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Format");
+                                ui.selectable_value(
+                                    &mut self.hour_format,
+                                    HourFormat::TwentyFourHour,
+                                    "24-hour",
+                                );
+                                ui.selectable_value(
+                                    &mut self.hour_format,
+                                    HourFormat::TwelveHour,
+                                    "12-hour",
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Text size");
+                                for (zoom, label) in
+                                    [(0.9, "Small"), (1.0, "Normal"), (1.15, "Large")]
+                                {
+                                    ui.selectable_value(&mut self.text_zoom, zoom, label);
+                                }
+                            });
+                            let mut always_on_top = self.settings.draft().always_on_top();
+                            if ui
+                                .checkbox(&mut always_on_top, self.tr(Key::AlwaysOnTop))
+                                .changed()
+                            {
+                                self.settings.draft_mut().set_always_on_top(always_on_top);
+                                preferences_changed = true;
+                            }
+                        });
+                    });
                 });
-                if let Some(server) = self.state.active_server() {
-                    ui.separator();
-                    ui.small(format!("{}: {}", self.tr(Key::Server), server.name()));
-                }
-                if let Some(error) = &self.control_error {
-                    ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
-                }
-                if let Some(notice) = &self.recovery_notice {
-                    ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notice);
-                }
-                if let Some(notification) = &self.notification {
-                    ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notification);
-                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let polling = self.worker.is_some();
+                    if ui
+                        .add_enabled(!polling, egui::Button::new(self.tr(Key::StartPolling)))
+                        .clicked()
+                    {
+                        self.start_polling();
+                    }
+                    if ui
+                        .add_enabled(polling, egui::Button::new(self.tr(Key::StopPolling)))
+                        .clicked()
+                    {
+                        self.stop_polling();
+                    }
+                    ui.label(if polling {
+                        self.tr(Key::PollingActive)
+                    } else {
+                        self.tr(Key::PollingStopped)
+                    });
+                    if let Some(server) = self.state.active_server() {
+                        ui.separator();
+                        ui.small(format!("{}: {}", self.tr(Key::Server), server.name()));
+                    }
+                    if let Some(error) = &self.control_error {
+                        ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
+                    }
+                    if let Some(notice) = &self.recovery_notice {
+                        ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notice);
+                    }
+                    if let Some(notification) = &self.notification {
+                        ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notification);
+                    }
+                });
             });
-        });
 
         if preferences_changed {
             self.notify("Preferences changed; apply them from Settings");
         }
+    }
+
+    fn show_status_banner(&self, ui: &mut egui::Ui, view: &presentation::Presentation) {
+        let color = match view.status.label.as_str() {
+            "Synchronized" => egui::Color32::from_rgb(65, 155, 95),
+            "Uncertain" => egui::Color32::from_rgb(205, 150, 45),
+            _ => egui::Color32::from_rgb(190, 70, 70),
+        };
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(color, egui::RichText::new(&view.status.label).strong());
+                ui.label("—");
+                ui.label(&view.status.detail);
+            });
+        });
+    }
+
+    fn show_offset_histogram(&self, ui: &mut egui::Ui) {
+        let samples: Vec<f64> = self.state.history().samples().copied().collect();
+        ui.label("Offset distribution");
+        if samples.len() < 2 {
+            ui.weak("Collecting samples...");
+            return;
+        }
+        const BINS: usize = 24;
+        let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let range = (max - min).max(1e-9);
+        let mut bins = [0usize; BINS];
+        for value in samples.iter().copied() {
+            let index = (((value - min) / range) * (BINS as f64 - 1.0)).round() as usize;
+            bins[index.min(BINS - 1)] += 1;
+        }
+        let maximum = bins.iter().copied().max().unwrap_or(1).max(1) as f32;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().min(460.0), 62.0),
+            egui::Sense::hover(),
+        );
+        let width = rect.width() / BINS as f32;
+        for (index, count) in bins.iter().enumerate() {
+            let height = *count as f32 / maximum * rect.height();
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + index as f32 * width, rect.bottom() - height),
+                    egui::vec2((width - 1.0).max(1.0), height),
+                ),
+                1.0,
+                egui::Color32::from_rgb(45, 145, 185),
+            );
+        }
+        ui.small(format!(
+            "min {:+.2} ms · max {:+.2} ms · {} samples",
+            min * 1000.0,
+            max * 1000.0,
+            samples.len()
+        ));
     }
 
     fn presentation(&self) -> presentation::Presentation {
@@ -509,6 +568,8 @@ impl MasterTimeApp {
     fn show_time(&mut self, ui: &mut egui::Ui) {
         let now = SystemTime::now();
         let view = self.presentation();
+        self.show_status_banner(ui, &view);
+        ui.add_space(8.0);
         ui.group(|ui| {
             ui.heading("Current time");
             ui.horizontal(|ui| {
@@ -560,6 +621,8 @@ impl MasterTimeApp {
             }
             let chart = ChartModel::from_histories(self.state.history(), &self.delay_history);
             ChartRenderer::default().show(ui, &chart);
+            ui.add_space(6.0);
+            self.show_offset_histogram(ui);
         });
         let measurement = self
             .state
@@ -626,6 +689,8 @@ impl MasterTimeApp {
         if let Some(error) = view.errors.message {
             ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
         }
+        ui.add_space(4.0);
+        ui.small("NTS is not available in this build; polling uses unauthenticated NTP.");
     }
 
     fn metric_grid(&self, ui: &mut egui::Ui, view: &presentation::Presentation) {
@@ -745,6 +810,7 @@ impl MasterTimeApp {
         ui.add_space(10.0);
         ui.group(|ui| {
             ui.heading("NTP response details");
+            ui.small("Protocol fields are shown from the most recent successful exchange.");
             if let Some(result) = self.state.latest_measurement() {
                 let header = &result.header;
                 let measurement = result.measurement;
@@ -799,14 +865,29 @@ impl MasterTimeApp {
                 ui.weak("Waiting for the first NTP response");
             }
         });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.heading("Security boundary");
+            ui.label("NTS is explicitly unsupported by the current transport backend.");
+            ui.small(
+                "No NTS-KE, TLS, cookies, AEAD, or authenticated extension fields are attempted.",
+            );
+        });
     }
 
     fn show_network(&self, ui: &mut egui::Ui) {
-        ui.heading("Network");
-        ui.small("Rolling statistics from polling attempts");
+        ui.horizontal(|ui| {
+            ui.heading("Network");
+            ui.label(egui::RichText::new("Rolling statistics").weak());
+        });
+        ui.small(
+            "Values are derived only from polling attempts; unavailable data is not invented.",
+        );
         let view = NetworkViewModel::new(&self.network_stats);
         egui::Grid::new("network-statistics")
+            .num_columns(3)
             .striped(true)
+            .spacing([18.0, 6.0])
             .show(ui, |ui| {
                 for row in view.rows() {
                     ui.label(row.label);
@@ -826,6 +907,7 @@ impl MasterTimeApp {
 
     fn show_calibration(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.tr(Key::ClockCalibration));
+        ui.small("Use the next minute boundary as a visual calibration reference.");
         let view = self.calibration.view();
         if !view.enabled {
             if ui.button("Begin calibration").clicked() {
@@ -835,9 +917,13 @@ impl MasterTimeApp {
         } else {
             if let Some(countdown) = view.countdown {
                 ui.label(format!(
-                    "Time until boundary: {} seconds",
-                    countdown.as_secs()
+                    "Time until boundary: {:.1} seconds",
+                    countdown.as_secs_f32()
                 ));
+                ui.add(
+                    egui::ProgressBar::new(1.0 - countdown.as_secs_f32().min(60.0) / 60.0)
+                        .desired_width(260.0),
+                );
             }
             if ui.button("Mark boundary").clicked() {
                 self.calibration.mark();
@@ -863,8 +949,8 @@ impl MasterTimeApp {
     }
 
     fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
-        ui.heading("System");
-        ui.small("Available platform and application information. Values not provided by the platform are omitted.");
+        ui.heading("Diagnostics");
+        ui.small("Platform and application information. Values not provided by the platform are omitted.");
         let snapshot = self.diagnostic_snapshot();
         let stratum = self
             .state
@@ -1143,9 +1229,11 @@ impl eframe::App for MasterTimeApp {
         self.handle_keyboard(context);
         self.receive_events();
         context.request_repaint_after(Duration::from_millis(250));
-        egui::CentralPanel::default().show(context, |ui| {
+        egui::TopBottomPanel::top("master-time-header").show(context, |ui| {
             self.show_header(ui);
-            ui.add_space(10.0);
+        });
+        egui::CentralPanel::default().show(context, |ui| {
+            ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 let tab_keys = [
                     Key::Time,
