@@ -37,3 +37,7 @@ pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingSta
 pub mod storage;
 
 pub use storage::{StorageError, load, load_config, save, save_config};
+
+pub mod localization;
+
+pub use localization::{English, Key, MISSING_TRANSLATION};
