@@ -15,3 +15,9 @@ pub use service::{
 pub mod health;
 
 pub use health::{HealthInput, HealthStatus, LeapIndicator, evaluate};
+
+pub mod config;
+
+pub use config::{
+    AppConfig, ConfigError, PollingPreferences, ServerProfile as ConfigServerProfile,
+};
