@@ -16,6 +16,7 @@ pub use calibration::{
     Calibration, CalibrationResult, CalibrationView, Clock, ClockSample, SystemClock,
     next_minute_boundary,
 };
+pub use clock_display::{ClockDisplayModel, DisplayMode, HourFormat, TimeZone};
 pub use global_servers::{GlobalServerCatalog, GlobalServerEntry};
 
 pub use service::{
@@ -27,6 +28,7 @@ pub mod health;
 
 pub use health::{HealthInput, HealthStatus, LeapIndicator, evaluate};
 
+pub mod clock_display;
 pub mod config;
 pub mod diagnostics_view;
 
