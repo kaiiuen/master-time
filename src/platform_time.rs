@@ -145,9 +145,12 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_PRIVILEGE_NOT_HELD: u32 = 1_314;
+    const FILETIME_TICKS_PER_SECOND: f64 = 10_000_000.0;
 
     #[repr(C)]
+    #[derive(Clone, Copy, Default)]
     struct WindowsSystemTime {
         year: u16,
         month: u16,
@@ -159,35 +162,63 @@ mod platform {
         milliseconds: u16,
     }
 
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetLastError() -> u32;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct WindowsFileTime {
+        low_date_time: u32,
+        high_date_time: u32,
     }
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        fn GetLastError() -> u32;
+        fn GetSystemTime(system_time: *mut WindowsSystemTime);
+        fn SystemTimeToFileTime(
+            system_time: *const WindowsSystemTime,
+            file_time: *mut WindowsFileTime,
+        ) -> i32;
+        fn FileTimeToSystemTime(
+            file_time: *const WindowsFileTime,
+            system_time: *mut WindowsSystemTime,
+        ) -> i32;
         fn SetSystemTime(system_time: *const WindowsSystemTime) -> i32;
     }
 
     pub(super) fn apply(
         correction: ApprovedCorrection,
     ) -> Result<AppliedCorrection, PlatformTimeError> {
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| PlatformTimeError::InvalidCorrection)?
-            .as_secs_f64()
-            + correction.offset;
-        let system_time = utc_system_time(seconds)?;
+        let mut current_utc = WindowsSystemTime::default();
+        unsafe { GetSystemTime(&mut current_utc) };
 
-        // This is the sole operating-system side effect in this module.
-        let succeeded = unsafe { SetSystemTime(&system_time) } != 0;
-        if succeeded {
+        let mut current_file_time = WindowsFileTime::default();
+        if unsafe { SystemTimeToFileTime(&current_utc, &mut current_file_time) } == 0 {
+            return Err(PlatformTimeError::PlatformFailure(unsafe {
+                GetLastError()
+            }));
+        }
+
+        let current_ticks = file_time_ticks(current_file_time);
+        let target_ticks = adjusted_file_time_ticks(current_ticks, correction.offset)?;
+        let target_file_time = WindowsFileTime {
+            low_date_time: target_ticks as u32,
+            high_date_time: (target_ticks >> 32) as u32,
+        };
+        let mut target_utc = WindowsSystemTime::default();
+        if unsafe { FileTimeToSystemTime(&target_file_time, &mut target_utc) } == 0 {
+            return Err(PlatformTimeError::PlatformFailure(unsafe {
+                GetLastError()
+            }));
+        }
+
+        // This is the sole operating-system side effect in this module. The
+        // SYSTEMTIME passed to SetSystemTime is explicitly UTC.
+        if unsafe { SetSystemTime(&target_utc) } != 0 {
             Ok(AppliedCorrection {
                 offset: correction.offset,
             })
         } else {
             let error = unsafe { GetLastError() };
-            if error == 5 {
+            if matches!(error, ERROR_ACCESS_DENIED | ERROR_PRIVILEGE_NOT_HELD) {
                 Err(PlatformTimeError::PermissionDenied)
             } else {
                 Err(PlatformTimeError::PlatformFailure(error))
@@ -195,49 +226,26 @@ mod platform {
         }
     }
 
-    fn utc_system_time(seconds: f64) -> Result<WindowsSystemTime, PlatformTimeError> {
-        if !seconds.is_finite() || seconds < 0.0 {
-            return Err(PlatformTimeError::InvalidCorrection);
-        }
-        let whole_seconds = seconds.floor();
-        if whole_seconds > u64::MAX as f64 {
-            return Err(PlatformTimeError::InvalidCorrection);
-        }
-        let days = (whole_seconds as u64) / 86_400;
-        let day_seconds = (whole_seconds as u64) % 86_400;
-        let (year, month, day) = civil_date(days)?;
-        Ok(WindowsSystemTime {
-            year,
-            month,
-            day_of_week: 0,
-            day,
-            hour: (day_seconds / 3_600) as u16,
-            minute: ((day_seconds % 3_600) / 60) as u16,
-            second: (day_seconds % 60) as u16,
-            milliseconds: ((seconds - whole_seconds) * 1_000.0) as u16,
-        })
+    fn file_time_ticks(file_time: WindowsFileTime) -> u64 {
+        (u64::from(file_time.high_date_time) << 32) | u64::from(file_time.low_date_time)
     }
 
-    // Howard Hinnant's civil-from-days algorithm, expressed without a date
-    // dependency so the FFI boundary remains the only Windows-specific code.
-    fn civil_date(days_since_epoch: u64) -> Result<(u16, u16, u16), PlatformTimeError> {
-        let z = i64::try_from(days_since_epoch)
-            .map_err(|_| PlatformTimeError::InvalidCorrection)?
-            + 719_468;
-        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-        let doe = z - era * 146_097;
-        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-        let year = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let month = (5 * doy + 2) / 153;
-        let day = doy - (153 * month + 2) / 5 + 1;
-        let year = year + if month >= 10 { 1 } else { 0 };
-        let month = month + if month < 10 { 3 } else { -9 };
-        Ok((
-            u16::try_from(year).map_err(|_| PlatformTimeError::InvalidCorrection)?,
-            u16::try_from(month).map_err(|_| PlatformTimeError::InvalidCorrection)?,
-            u16::try_from(day).map_err(|_| PlatformTimeError::InvalidCorrection)?,
-        ))
+    fn adjusted_file_time_ticks(
+        current_ticks: u64,
+        offset_seconds: f64,
+    ) -> Result<u64, PlatformTimeError> {
+        if !offset_seconds.is_finite() {
+            return Err(PlatformTimeError::InvalidCorrection);
+        }
+
+        // FILETIME has 100-nanosecond resolution. Truncation matches the
+        // millisecond resolution of SYSTEMTIME while keeping the adjustment
+        // deterministic for fractional corrections.
+        let offset_ticks = (offset_seconds * FILETIME_TICKS_PER_SECOND).trunc() as i128;
+        let target_ticks = i128::from(current_ticks)
+            .checked_add(offset_ticks)
+            .ok_or(PlatformTimeError::InvalidCorrection)?;
+        u64::try_from(target_ticks).map_err(|_| PlatformTimeError::InvalidCorrection)
     }
 }
 
@@ -262,14 +270,26 @@ mod tests {
             .unwrap();
         assert_eq!(preview.offset, -2.5);
         assert!(preview.dry_run);
+
+        let opted_in_preview = PlatformTimeAdapter::with_explicit_opt_in()
+            .preview(correction(1.25))
+            .unwrap();
+        assert_eq!(opted_in_preview.offset, 1.25);
+        assert!(opted_in_preview.dry_run);
     }
 
     #[test]
     fn non_finite_corrections_are_refused() {
-        assert_eq!(
-            PlatformTimeAdapter::new().preview(correction(f64::NAN)),
-            Err(PlatformTimeError::InvalidCorrection)
-        );
+        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                PlatformTimeAdapter::new().preview(correction(offset)),
+                Err(PlatformTimeError::InvalidCorrection)
+            );
+            assert_eq!(
+                PlatformTimeAdapter::with_explicit_opt_in().apply(correction(offset)),
+                Err(PlatformTimeError::InvalidCorrection)
+            );
+        }
     }
 
     #[cfg(not(windows))]
