@@ -7,6 +7,9 @@ edition = "2024"
 name = "master_time"
 path = "src/lib.rs"
 
+[dependencies]
+eframe = "0.29"
+
 [profile.release]
 opt-level = 2
 lto = true
