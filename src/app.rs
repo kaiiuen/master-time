@@ -1,36 +1,36 @@
 //! The desktop shell for Master Time.
 
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui;
-use master_time::ConfigServerProfile;
 use master_time::calibration::Calibration;
+use master_time::chart::ChartRenderer;
 use master_time::clock_display::ClockDisplayModel;
-use master_time::config::{AppConfig, MAX_POLL_INTERVAL, MIN_POLL_INTERVAL};
+use master_time::config::{
+    AppConfig, MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, ServerProfile as ConfigServerProfile,
+};
 use master_time::diagnostics_view::DiagnosticsView;
 use master_time::global_servers::GlobalServerCatalog;
-use master_time::localization::{English, Key};
+use master_time::history_view::ChartModel;
+
+use master_time::persistence::PersistenceManager;
 use master_time::polling::{PollEvent, PollingWorker};
+
+use master_time::measurement::MeasurementHistory;
 use master_time::server_manager::ServerManager;
 use master_time::servers::{Category, ServerCatalog, ServerProfile as PollingServerProfile};
 use master_time::settings::{Language, LocalSettings, SettingsModel, Theme};
 use master_time::state::{ApplicationState, DEFAULT_HISTORY_CAPACITY};
 use master_time::sync_policy::{SyncDisposition, SyncPolicy};
+use master_time::time_action::{CorrectionRequest, TimeAction};
+use master_time::translations::{Key, Language as TranslationLanguage, TranslationCatalog};
 
 #[path = "ui.rs"]
 mod presentation;
 
 const WINDOW_TITLE: &str = "Master Time";
-const TABS: [&str; 7] = [
-    "Time",
-    "Server",
-    "Network",
-    "Calibration",
-    "Diagnostics",
-    "Global Servers",
-    "Settings",
-];
 
 pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -50,6 +50,7 @@ pub fn run() -> eframe::Result {
 
 struct MasterTimeApp {
     state: ApplicationState,
+    persistence: PersistenceManager,
     worker: Option<PollingWorker>,
     events: Option<Receiver<PollEvent>>,
     control_error: Option<String>,
@@ -63,11 +64,25 @@ struct MasterTimeApp {
     settings: SettingsModel,
     local_settings: LocalSettings,
     interval_text: String,
+    delay_history: MeasurementHistory,
+
+    recovery_notice: Option<String>,
+    notification: Option<String>,
+    time_action: TimeAction,
 }
 
 impl MasterTimeApp {
     fn new() -> Self {
         let catalog = ServerCatalog::built_in();
+        let persistence_path = Self::persistence_path();
+        let (mut persistence, mut load_error) =
+            match PersistenceManager::load_or_default(&persistence_path) {
+                Ok(manager) => (manager, None),
+                Err(error) => (
+                    PersistenceManager::new(&persistence_path, AppConfig::default()),
+                    Some(error.to_string()),
+                ),
+            };
         let first_server = catalog
             .entries()
             .first()
@@ -75,8 +90,13 @@ impl MasterTimeApp {
             .profile();
         let profile = ConfigServerProfile::new(first_server.name(), first_server.hostname())
             .expect("built-in server profile must be valid");
-        let mut config = AppConfig::default();
-        config.add_server(profile);
+        let mut config = persistence.config().clone();
+        if config.servers().is_empty() {
+            config.add_server(profile);
+            if let Err(error) = persistence.set_config(config.clone()) {
+                load_error = Some(error.to_string());
+            }
+        }
         let state = ApplicationState::new(config, DEFAULT_HISTORY_CAPACITY);
         let manager = ServerManager::new(
             ApplicationState::new(state.config().clone(), DEFAULT_HISTORY_CAPACITY),
@@ -88,6 +108,7 @@ impl MasterTimeApp {
 
         Self {
             state,
+            persistence,
             worker: None,
             events: None,
             control_error: None,
@@ -101,6 +122,40 @@ impl MasterTimeApp {
             settings,
             local_settings,
             interval_text,
+            delay_history: MeasurementHistory::new(DEFAULT_HISTORY_CAPACITY),
+
+            recovery_notice: None,
+            notification: load_error,
+            time_action: TimeAction::default(),
+        }
+    }
+
+    fn persistence_path() -> PathBuf {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("master-time.conf")
+    }
+
+    fn tr(&self, key: Key) -> &'static str {
+        let language = match self.settings.draft().language() {
+            Language::English => TranslationLanguage::English,
+            Language::SimplifiedChinese => TranslationLanguage::SimplifiedChinese,
+            Language::TraditionalChinese => TranslationLanguage::TraditionalChinese,
+        };
+        TranslationCatalog::new(language).text(key)
+    }
+
+    fn notify(&mut self, message: impl Into<String>) {
+        self.notification = Some(message.into());
+    }
+
+    fn sync_persistence(&mut self) {
+        let config = self.state.config().clone();
+        if let Err(error) = self.persistence.set_config(config) {
+            self.notify(error.to_string());
+        }
+        if let Err(error) = self.persistence.save_if_dirty() {
+            self.notify(error.to_string());
         }
     }
 
@@ -118,7 +173,7 @@ impl MasterTimeApp {
                 self.events = Some(events);
                 self.control_error = None;
             }
-            Err(error) => self.control_error = Some(error.to_string()),
+            Err(error) => self.notify(error.to_string()),
         }
     }
 
@@ -127,6 +182,9 @@ impl MasterTimeApp {
             worker.request_shutdown();
         }
         self.events = None;
+        if let Err(error) = self.persistence.save_if_dirty() {
+            self.notify(error.to_string());
+        }
     }
 
     fn receive_events(&mut self) {
@@ -135,33 +193,54 @@ impl MasterTimeApp {
         };
         while let Ok(event) = events.try_recv() {
             match event {
-                PollEvent::Success { result, .. } => self.state.apply_success(result),
-                PollEvent::Error { error, .. } => self.state.record_error(error),
+                PollEvent::Success {
+                    result,
+                    consecutive_failures,
+                    ..
+                } => {
+                    self.delay_history.push(result.measurement.round_trip_delay);
+                    self.state.apply_success(result);
+                    self.recovery_notice = (consecutive_failures > 0).then(|| {
+                        format!("Polling recovered after {consecutive_failures} failures")
+                    });
+                }
+                PollEvent::Error {
+                    error,
+                    consecutive_failures,
+                    retry_delay,
+                    ..
+                } => {
+                    self.state.record_error(error);
+                    self.recovery_notice = Some(format!(
+                        "Polling failed ({consecutive_failures} consecutive); retrying in {}s",
+                        retry_delay.map_or(0, |delay| delay.as_secs())
+                    ));
+                }
             }
         }
         self.events = Some(events);
     }
 
     fn show_controls(&mut self, ui: &mut egui::Ui) {
+        let start_label = self.tr(Key::StartPolling);
+        let stop_label = self.tr(Key::StopPolling);
+        let active_label = self.tr(Key::PollingActive);
+        let stopped_label = self.tr(Key::PollingStopped);
         ui.horizontal(|ui| {
             let polling = self.worker.is_some();
             if ui
-                .add_enabled(!polling, egui::Button::new("Start polling"))
+                .add_enabled(!polling, egui::Button::new(start_label))
                 .clicked()
             {
                 self.start_polling();
             }
             if ui
-                .add_enabled(polling, egui::Button::new("Stop polling"))
+                .add_enabled(polling, egui::Button::new(stop_label))
                 .clicked()
             {
                 self.stop_polling();
             }
-            ui.label(if polling {
-                "Polling active"
-            } else {
-                "Polling stopped"
-            });
+            ui.label(if polling { active_label } else { stopped_label });
             if let Some(server) = self.state.active_server() {
                 ui.separator();
                 ui.label(format!("Active: {}", server.name()));
@@ -169,6 +248,12 @@ impl MasterTimeApp {
         });
         if let Some(error) = &self.control_error {
             ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
+        }
+        if let Some(notice) = &self.recovery_notice {
+            ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notice);
+        }
+        if let Some(notification) = &self.notification {
+            ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notification);
         }
     }
 
@@ -181,19 +266,48 @@ impl MasterTimeApp {
         })
     }
 
-    fn show_time(&self, ui: &mut egui::Ui) {
+    fn show_time(&mut self, ui: &mut egui::Ui) {
         let view = self.presentation();
-        ui.heading("Master Time");
+        ui.heading(self.tr(Key::MasterTime));
         ui.label(ClockDisplayModel::new(Some(SystemTime::now())).format());
         ui.separator();
-        ui.heading(English::text(Key::SyncStatus));
+        ui.heading(self.tr(Key::SyncStatus));
         ui.label(format!("{} — {}", view.status.label, view.status.detail));
         ui.separator();
-        ui.heading(English::text(Key::Metrics));
+        ui.heading(self.tr(Key::Metrics));
         self.metric_grid(ui, &view);
         if let Some(summary) = view.history.summary {
             ui.separator();
-            ui.label(format!("History: {summary}"));
+            ui.label(format!("{}: {summary}", self.tr(Key::History)));
+        }
+        let chart = ChartModel::from_histories(self.state.history(), &self.delay_history);
+        ChartRenderer::default().show(ui, &chart);
+        let measurement = self
+            .state
+            .latest_measurement()
+            .map(|result| result.measurement);
+        let stratum = self
+            .state
+            .latest_measurement()
+            .map_or(0, |result| result.header.stratum);
+        let request = CorrectionRequest::new(measurement, self.state.health_status(), stratum);
+        let preview = self.time_action.preview(request);
+        ui.separator();
+        ui.label(format!(
+            "Safe correction preview: {}",
+            match preview.offset {
+                Some(offset) => format!("{offset:+.3}s ({:?})", preview.disposition),
+                None => "no measurement".to_owned(),
+            }
+        ));
+        if ui.button("Request safe correction preview").clicked() {
+            match self.time_action.request_correction(request) {
+                Ok(approved) => self.notify(format!(
+                    "Correction approved for preview: {:+.3}s; no clock change was made",
+                    approved.offset
+                )),
+                Err(error) => self.notify(error.to_string()),
+            }
         }
         if let Some(error) = view.errors.message {
             ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
@@ -217,7 +331,7 @@ impl MasterTimeApp {
     }
 
     fn show_server(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Configured servers");
+        ui.heading(self.tr(Key::ConfiguredServers));
         let mut selected = self.state.config().active_server_index();
         for (index, server) in self.state.config().servers().iter().enumerate() {
             ui.radio_value(
@@ -229,21 +343,24 @@ impl MasterTimeApp {
         if selected != self.state.config().active_server_index() {
             if self.server_manager.select(selected).is_ok() {
                 if let Err(error) = self.state.set_active_server(selected) {
-                    self.control_error = Some(error.to_string());
+                    self.notify(error.to_string());
+                } else {
+                    self.sync_persistence();
                 }
             }
         }
         ui.separator();
         ui.label(format!(
-            "{} configured profile(s)",
-            self.state.config().servers().len()
+            "{} {}",
+            self.state.config().servers().len(),
+            self.tr(Key::ConfiguredProfiles)
         ));
-        ui.label("Server profiles are validated before they enter application state.");
+        ui.label(self.tr(Key::ServerProfilesValidated));
     }
 
     fn show_network(&self, ui: &mut egui::Ui) {
-        ui.heading("Network");
-        ui.label("NTP measurement and polling status");
+        ui.heading(self.tr(Key::Network));
+        ui.label(self.tr(Key::NtpMeasurementPollingStatus));
         let view = self.presentation();
         self.metric_grid(ui, &view);
         ui.separator();
@@ -268,7 +385,7 @@ impl MasterTimeApp {
     }
 
     fn show_calibration(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Clock calibration");
+        ui.heading(self.tr(Key::ClockCalibration));
         let view = self.calibration.view();
         if !view.enabled {
             if ui.button("Begin calibration").clicked() {
@@ -306,7 +423,7 @@ impl MasterTimeApp {
     }
 
     fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Diagnostics");
+        ui.heading(self.tr(Key::Diagnostics));
         let snapshot = self.diagnostics.collect();
         let stratum = self
             .state
@@ -330,9 +447,9 @@ impl MasterTimeApp {
     }
 
     fn show_global_servers(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Global server catalog");
+        ui.heading(self.tr(Key::GlobalServerCatalog));
         ui.horizontal(|ui| {
-            ui.label("Search");
+            ui.label(self.tr(Key::Search));
             ui.text_edit_singleline(&mut self.catalog_query);
             egui::ComboBox::from_id_salt("global-category")
                 .selected_text(self.catalog_category.map_or("All", Category::as_str))
@@ -364,7 +481,7 @@ impl MasterTimeApp {
                     entry.strategy(),
                     entry.notes()
                 ));
-                if ui.button("Use server").clicked() {
+                if ui.button(self.tr(Key::UseServer)).clicked() {
                     pending_server = Some((
                         entry.profile().name().to_owned(),
                         entry.profile().hostname().to_owned(),
@@ -383,6 +500,7 @@ impl MasterTimeApp {
                     )
                     .expect("server manager maintains valid configuration");
                     self.state = ApplicationState::new(config, self.state.history().capacity());
+                    self.sync_persistence();
                     self.control_error = None;
                 }
                 Err(error) => self.control_error = Some(error.to_string()),
@@ -391,11 +509,11 @@ impl MasterTimeApp {
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
+        ui.heading(self.tr(Key::Settings));
         ui.horizontal(|ui| {
-            ui.label("Polling interval (seconds)");
+            ui.label(self.tr(Key::PollingIntervalSeconds));
             ui.text_edit_singleline(&mut self.interval_text);
-            if ui.button("Set draft").clicked() {
+            if ui.button(self.tr(Key::SetDraft)).clicked() {
                 match self.interval_text.trim().parse::<u64>() {
                     Ok(seconds) => {
                         if let Err(error) = self
@@ -413,7 +531,8 @@ impl MasterTimeApp {
             }
         });
         ui.label(format!(
-            "Allowed range: {}–{} seconds",
+            "{}: {}–{} seconds",
+            self.tr(Key::AllowedRangeSeconds),
             MIN_POLL_INTERVAL.as_secs(),
             MAX_POLL_INTERVAL.as_secs()
         ));
@@ -448,11 +567,14 @@ impl MasterTimeApp {
                 }
             });
         let mut always_on_top = self.settings.draft().always_on_top();
-        if ui.checkbox(&mut always_on_top, "Always on top").changed() {
+        if ui
+            .checkbox(&mut always_on_top, self.tr(Key::AlwaysOnTop))
+            .changed()
+        {
             self.settings.draft_mut().set_always_on_top(always_on_top);
         }
         ui.horizontal(|ui| {
-            if ui.button("Apply").clicked() {
+            if ui.button(self.tr(Key::Apply)).clicked() {
                 let interval_changed = self.settings.draft().polling_interval()
                     != self.state.config().polling().interval();
                 let selection_changed = self.settings.draft().active_server()
@@ -465,8 +587,17 @@ impl MasterTimeApp {
                 match self.settings.apply(&mut config, &mut local) {
                     Ok(()) => {
                         let capacity = self.state.history().capacity();
+                        let server_changed = self.state.config().active_server_index()
+                            != config.active_server_index();
                         self.state = ApplicationState::new(config, capacity);
+                        if server_changed {
+                            self.delay_history = MeasurementHistory::new(capacity);
+                        }
+                        let _ = self
+                            .server_manager
+                            .select(self.state.config().active_server_index());
                         self.local_settings = local;
+                        self.sync_persistence();
                         self.interval_text = self
                             .settings
                             .draft()
@@ -478,7 +609,7 @@ impl MasterTimeApp {
                     Err(error) => self.control_error = Some(error.to_string()),
                 }
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(self.tr(Key::Cancel)).clicked() {
                 self.settings.cancel();
                 self.interval_text = self
                     .settings
@@ -490,7 +621,8 @@ impl MasterTimeApp {
             }
         });
         ui.label(format!(
-            "Local settings: {:?}, {:?}",
+            "{}: {:?}, {:?}",
+            self.tr(Key::LocalSettings),
             self.local_settings.theme(),
             self.local_settings.language()
         ));
@@ -505,8 +637,20 @@ impl eframe::App for MasterTimeApp {
             self.show_controls(ui);
             ui.separator();
             ui.horizontal(|ui| {
-                for (index, title) in TABS.iter().enumerate() {
-                    if ui.selectable_label(self.tab == index, *title).clicked() {
+                let tab_keys = [
+                    Key::Time,
+                    Key::Server,
+                    Key::Network,
+                    Key::Calibration,
+                    Key::Diagnostics,
+                    Key::GlobalServers,
+                    Key::Settings,
+                ];
+                for (index, key) in tab_keys.into_iter().enumerate() {
+                    if ui
+                        .selectable_label(self.tab == index, self.tr(key))
+                        .clicked()
+                    {
                         self.tab = index;
                     }
                 }
