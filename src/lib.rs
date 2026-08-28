@@ -5,6 +5,7 @@ pub mod measurement;
 pub mod ntp;
 pub mod server_manager;
 pub mod servers;
+pub mod settings;
 pub mod transport;
 
 pub mod service;
@@ -39,6 +40,7 @@ pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingSta
 pub use server_manager::{ServerManager, ServerManagerError};
 
 pub use history_view::{ChartModel, NormalizedPoint, ValueRange};
+pub use settings::{Language, LocalSettings, SettingsDraft, SettingsError, SettingsModel, Theme};
 
 pub mod storage;
 
