@@ -90,7 +90,7 @@ impl PollingWorker {
     ///
     /// Shutdown is idempotent. A worker already performing a network request
     /// finishes that bounded request before joining.
-    pub fn shutdown(mut self) -> Result<(), PollingError> {
+    pub fn shutdown(self) -> Result<(), PollingError> {
         self.request_shutdown();
         self.join()
     }
