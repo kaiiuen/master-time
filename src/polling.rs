@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::config::{self, ConfigError};
 use crate::health::{self, HealthStatus, LeapIndicator};
+use crate::recovery::RetryPolicy;
 use crate::servers::ServerProfile;
 use crate::service::{MeasurementResult, NtpMeasurementService, ServiceError};
 use crate::transport::NtpTransport;
@@ -23,11 +24,20 @@ pub enum PollEvent {
         profile: ServerProfile,
         result: MeasurementResult,
         health: HealthStatus,
+        /// Consecutive polling failures after this successful attempt.
+        /// Always zero because success resets the retry policy.
+        consecutive_failures: u32,
+        /// There is no retry backoff after a successful attempt.
+        retry_delay: Option<Duration>,
     },
     /// The measurement service could not produce a result.
     Error {
         profile: ServerProfile,
         error: ServiceError,
+        /// Number of consecutive failures including this attempt.
+        consecutive_failures: u32,
+        /// Delay before the next attempt, as selected by the retry policy.
+        retry_delay: Option<Duration>,
     },
 }
 
@@ -120,10 +130,29 @@ impl PollingWorker {
     where
         F: Fn(&ServerProfile) -> Result<MeasurementResult, ServiceError> + Send + 'static,
     {
+        Self::spawn_with_policy(profile, interval, RetryPolicy::default(), measure)
+    }
+
+    fn spawn_with_policy<F>(
+        profile: ServerProfile,
+        interval: Duration,
+        retry_policy: RetryPolicy,
+        measure: F,
+    ) -> (Self, Receiver<PollEvent>)
+    where
+        F: Fn(&ServerProfile) -> Result<MeasurementResult, ServiceError> + Send + 'static,
+    {
         let (event_sender, event_receiver) = mpsc::channel();
         let (stop_sender, stop_receiver) = mpsc::channel();
         let thread = thread::spawn(move || {
-            run_loop(profile, interval, stop_receiver, event_sender, measure);
+            run_loop(
+                profile,
+                interval,
+                stop_receiver,
+                event_sender,
+                retry_policy,
+                measure,
+            );
         });
 
         (
@@ -164,28 +193,45 @@ fn run_loop<F>(
     interval: Duration,
     stop_receiver: Receiver<()>,
     event_sender: Sender<PollEvent>,
+    mut retry_policy: RetryPolicy,
     measure: F,
 ) where
     F: Fn(&ServerProfile) -> Result<MeasurementResult, ServiceError>,
 {
     loop {
-        let event = match measure(&profile) {
-            Ok(result) => PollEvent::Success {
-                profile: profile.clone(),
-                health: evaluate_health(&result),
-                result,
-            },
-            Err(error) => PollEvent::Error {
-                profile: profile.clone(),
-                error,
-            },
+        let (event, next_delay) = match measure(&profile) {
+            Ok(result) => {
+                let decision = retry_policy.on_success();
+                (
+                    PollEvent::Success {
+                        profile: profile.clone(),
+                        health: evaluate_health(&result),
+                        result,
+                        consecutive_failures: decision.consecutive_failures(),
+                        retry_delay: decision.retry_delay(),
+                    },
+                    interval,
+                )
+            }
+            Err(error) => {
+                let decision = retry_policy.on_failure();
+                (
+                    PollEvent::Error {
+                        profile: profile.clone(),
+                        error,
+                        consecutive_failures: decision.consecutive_failures(),
+                        retry_delay: decision.retry_delay(),
+                    },
+                    decision.retry_delay().unwrap_or(interval),
+                )
+            }
         };
 
         if event_sender.send(event).is_err() {
             break;
         }
 
-        match stop_receiver.recv_timeout(interval) {
+        match stop_receiver.recv_timeout(next_delay) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -278,6 +324,65 @@ mod tests {
         ));
         worker.shutdown().unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retry_metadata_reports_backoff_and_success_resets_policy() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&attempts);
+        let policy = RetryPolicy::new(Duration::from_millis(1), Duration::from_millis(2));
+        let (worker, events) =
+            PollingWorker::spawn_with_policy(profile(), Duration::ZERO, policy, move |_| {
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                match attempt {
+                    0 | 1 | 3 => Err(ServiceError::UnsupportedMode(1)),
+                    2 => Ok(result()),
+                    _ => unreachable!("the worker should be stopped after four events"),
+                }
+            });
+
+        let first = events.recv().unwrap();
+        assert!(matches!(
+            first,
+            PollEvent::Error {
+                consecutive_failures: 1,
+                retry_delay: Some(delay),
+                ..
+            } if delay == Duration::from_millis(1)
+        ));
+
+        let second = events.recv().unwrap();
+        assert!(matches!(
+            second,
+            PollEvent::Error {
+                consecutive_failures: 2,
+                retry_delay: Some(delay),
+                ..
+            } if delay == Duration::from_millis(2)
+        ));
+
+        let success = events.recv().unwrap();
+        assert!(matches!(
+            success,
+            PollEvent::Success {
+                consecutive_failures: 0,
+                retry_delay: None,
+                ..
+            }
+        ));
+
+        let after_reset = events.recv().unwrap();
+        assert!(matches!(
+            after_reset,
+            PollEvent::Error {
+                consecutive_failures: 1,
+                retry_delay: Some(delay),
+                ..
+            } if delay == Duration::from_millis(1)
+        ));
+
+        worker.shutdown().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
     }
 
     #[test]

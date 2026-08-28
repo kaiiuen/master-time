@@ -103,3 +103,33 @@ pub use system_tray::{
     HIDE_LABEL, MENU_ITEMS, QUIT_LABEL, SHOW_LABEL, START_POLLING_LABEL, STOP_POLLING_LABEL,
     SystemTrayState, TrayAction, TrayCommand, TrayEvent, TrayMenuItem, menu_items,
 };
+
+pub mod nts_transport;
+
+pub use nts_transport::{
+    DEFAULT_NTS_TIMEOUT, NtsTransportBackend, NtsTransportBoundary, NtsTransportConfig,
+    NtsTransportConfigError, NtsTransportError, UnsupportedNtsPolicy,
+};
+
+pub mod platform_time;
+
+pub use platform_time::{
+    AppliedCorrection, CorrectionDryRun, PlatformTimeAdapter, PlatformTimeError,
+};
+
+pub mod failover;
+
+pub use failover::FailoverCoordinator;
+
+pub mod network_stats;
+
+pub use network_stats::{
+    NetworkStatistics, NetworkStatisticsAccumulator, NetworkStatisticsError, NetworkStats,
+};
+
+pub mod notifications;
+
+pub use notifications::{
+    Clock as NotificationClock, Notification, NotificationCenter, NotificationKind, Severity,
+    SystemClock as NotificationSystemClock,
+};
