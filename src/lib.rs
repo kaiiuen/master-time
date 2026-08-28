@@ -33,3 +33,7 @@ pub use polling::{PollEvent, PollingError, PollingWorker};
 pub mod state;
 
 pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingState};
+
+pub mod storage;
+
+pub use storage::{StorageError, load, load_config, save, save_config};
