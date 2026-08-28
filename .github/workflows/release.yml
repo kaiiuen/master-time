@@ -25,9 +25,77 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Upload Windows binary
+      - name: Sign Windows binary when configured
+        shell: pwsh
+        env:
+          MASTER_TIME_SIGNING_CERTIFICATE_BASE64: ${{ secrets.MASTER_TIME_SIGNING_CERTIFICATE_BASE64 }}
+          MASTER_TIME_SIGNING_THUMBPRINT: ${{ secrets.MASTER_TIME_SIGNING_THUMBPRINT }}
+          MASTER_TIME_SIGNING_PASSWORD: ${{ secrets.MASTER_TIME_SIGNING_PASSWORD }}
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE 'target/release/master-time.exe'
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'master-time-signing.pfx'
+          $signToolPath = (Get-Command 'signtool.exe' -CommandType Application -ErrorAction SilentlyContinue).Source
+          if ([string]::IsNullOrWhiteSpace($signToolPath)) {
+            $signToolPath = (Get-ChildItem `
+              -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin') `
+              -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1).FullName
+          }
+          $certificateConfigured = -not [string]::IsNullOrWhiteSpace($env:MASTER_TIME_SIGNING_CERTIFICATE_BASE64)
+          $thumbprintConfigured = -not [string]::IsNullOrWhiteSpace($env:MASTER_TIME_SIGNING_THUMBPRINT)
+          $passwordConfigured = -not [string]::IsNullOrWhiteSpace($env:MASTER_TIME_SIGNING_PASSWORD)
+
+          if (-not $certificateConfigured -or -not $thumbprintConfigured -or -not $passwordConfigured) {
+            Write-Host '::notice::Windows signing secrets are not fully configured; producing an unsigned artifact.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($signToolPath)) {
+            Write-Host '::notice::signtool.exe is not available on the runner; producing an unsigned artifact.'
+            exit 0
+          }
+
+          try {
+            [System.IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:MASTER_TIME_SIGNING_CERTIFICATE_BASE64))
+            & (Join-Path $env:GITHUB_WORKSPACE 'packaging/windows/sign.ps1') `
+              -Path $exePath `
+              -CertificatePath $certificatePath `
+              -CertificateThumbprint $env:MASTER_TIME_SIGNING_THUMBPRINT `
+              -SignToolPath $signToolPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "The signing script exited with code $LASTEXITCODE."
+            }
+            Write-Host '::notice::Windows executable was signed and verified.'
+          }
+          catch {
+            Write-Error 'Windows signing was configured but failed; refusing to publish an unverified artifact.'
+            exit 1
+          }
+          finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:MASTER_TIME_SIGNING_PASSWORD -ErrorAction SilentlyContinue
+          }
+
+      - name: Prepare artifact and checksum
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifact'
+          New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+          Copy-Item `
+            -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'target/release/master-time.exe') `
+            -Destination (Join-Path $artifactDirectory 'master-time.exe')
+          $hash = (Get-FileHash `
+            -LiteralPath (Join-Path $artifactDirectory 'master-time.exe') `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content `
+            -LiteralPath (Join-Path $artifactDirectory 'master-time.exe.sha256') `
+            -Value "$hash  master-time.exe" `
+            -Encoding utf8 -NoNewline
+
+      - name: Upload Windows binary and checksum
         uses: actions/upload-artifact@v4
         with:
           name: master-time-windows
-          path: target/release/master-time.exe
+          path: artifact/*
           if-no-files-found: error
