@@ -1,25 +1,29 @@
 [package]
-name = "master-time"
+name = "master-clock"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-name = "master_time"
-path = "src/lib.rs"
-
-[features]
-default = []
-# Opts into the NTS transport boundary only. This does not enable NTS-KE,
-# TLS, AEAD, cookies, authenticated extension fields, or replay protection.
-# It exists so a future vetted backend can be added without silently changing
-# the default security posture.
-nts-boundary = []
-
 [dependencies]
+chrono = "0.4"
 eframe = "0.29"
-# Deliberately no NTS dependency: the candidates reviewed on 2026-08-28 do not
-# meet this application's maturity and compatibility bar. See src/nts.rs.
+dark-light = "2"
+ureq = "2"
+serde_json = "1"
+litcrypt = "0.4.0"
+windows = { version = "0.58", features = [
+    "Win32_System_SystemInformation",
+    "Win32_System_Performance",
+    "Win32_System_Power",
+    "Win32_System_Time",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_Foundation",
+] }
 
 [profile.release]
-opt-level = 2
+opt-level = "z"
 lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
