@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::measurement::{self, FourTimestamps, Measurement, TimestampName};
 use crate::ntp::{self, NtpHeader, PacketError};
@@ -184,6 +184,8 @@ pub fn measure(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
