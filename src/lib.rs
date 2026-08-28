@@ -25,3 +25,7 @@ pub use config::{
 pub mod platform;
 
 pub use platform::{DiagnosticsCollector, DiagnosticsSnapshot, collect_diagnostics};
+
+pub mod polling;
+
+pub use polling::{PollEvent, PollingError, PollingWorker};
