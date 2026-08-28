@@ -1,6 +1,7 @@
 //! Testable building blocks for the Master Time application.
 
 pub mod calibration;
+pub mod global_servers;
 pub mod history_view;
 pub mod measurement;
 pub mod ntp;
@@ -15,6 +16,7 @@ pub use calibration::{
     Calibration, CalibrationResult, CalibrationView, Clock, ClockSample, SystemClock,
     next_minute_boundary,
 };
+pub use global_servers::{GlobalServerCatalog, GlobalServerEntry};
 
 pub use service::{
     MeasurementResult, NtpMeasurementService, ServiceError, assemble_result, measure,
