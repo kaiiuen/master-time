@@ -7,14 +7,18 @@ use std::time::{Duration, SystemTime};
 use eframe::egui;
 use master_time::calibration::Calibration;
 use master_time::chart::ChartRenderer;
-use master_time::clock_display::ClockDisplayModel;
+use master_time::clock_display::{ClockDisplayModel, DisplayMode, HourFormat, TimeZone};
 use master_time::config::{
     AppConfig, MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, ServerProfile as ConfigServerProfile,
 };
 use master_time::diagnostic_export::{DiagnosticSnapshot, ServerInfo};
+
 use master_time::diagnostics_view::DiagnosticsView;
 use master_time::global_servers::GlobalServerCatalog;
 use master_time::history_view::ChartModel;
+use master_time::measurement::MeasurementHistory;
+use master_time::network_stats::NetworkStats;
+use master_time::network_view::NetworkViewModel;
 
 use master_time::persistence::PersistenceManager;
 use master_time::polling::{PollEvent, PollingWorker};
@@ -22,12 +26,12 @@ use master_time::polling::{PollEvent, PollingWorker};
 use master_time::accessibility::{
     FocusTarget, KeyboardNavigation, NavigationKey, NavigationResult,
 };
-use master_time::measurement::MeasurementHistory;
+
 use master_time::server_manager::ServerManager;
 use master_time::servers::{Category, ServerCatalog, ServerProfile as PollingServerProfile};
 use master_time::settings::{Language, LocalSettings, SettingsModel, Theme};
 use master_time::state::{ApplicationState, DEFAULT_HISTORY_CAPACITY};
-use master_time::sync_policy::{SyncDisposition, SyncPolicy};
+
 use master_time::system_tray::{SystemTrayState, TrayAction};
 use master_time::time_action::{CorrectionRequest, TimeAction};
 use master_time::translations::{Key, Language as TranslationLanguage, TranslationCatalog};
@@ -52,6 +56,13 @@ pub fn run() -> eframe::Result {
         options,
         Box::new(|_creation_context| Ok(Box::new(MasterTimeApp::new()))),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerEditMode {
+    None,
+    Add,
+    Edit(usize),
 }
 
 struct MasterTimeApp {
@@ -80,6 +91,12 @@ struct MasterTimeApp {
     correction_opt_in: bool,
     tray: SystemTrayBackend,
     navigation: KeyboardNavigation,
+    network_stats: NetworkStats,
+    hour_format: HourFormat,
+    display_mode: DisplayMode,
+    edit_mode: ServerEditMode,
+    edit_name: String,
+    edit_hostname: String,
 }
 
 impl MasterTimeApp {
@@ -151,6 +168,12 @@ impl MasterTimeApp {
             correction_opt_in: false,
             tray,
             navigation: KeyboardNavigation::new(7, 0),
+            network_stats: NetworkStats::new(DEFAULT_HISTORY_CAPACITY),
+            hour_format: HourFormat::TwentyFourHour,
+            display_mode: DisplayMode::Clock,
+            edit_mode: ServerEditMode::None,
+            edit_name: String::new(),
+            edit_hostname: String::new(),
         }
     }
 
@@ -171,6 +194,19 @@ impl MasterTimeApp {
 
     fn notify(&mut self, message: impl Into<String>) {
         self.notification = Some(message.into());
+    }
+
+    fn sync_server_manager_state(&mut self) {
+        let config = AppConfig::new(
+            self.server_manager.profiles().to_vec(),
+            self.server_manager.selected_index(),
+            self.state.config().polling(),
+        )
+        .expect("server manager maintains valid configuration");
+        let capacity = self.state.history().capacity();
+        self.state = ApplicationState::new(config, capacity);
+        self.settings = SettingsModel::new(self.state.config(), self.local_settings);
+        self.sync_persistence();
     }
 
     fn sync_persistence(&mut self) {
@@ -287,6 +323,7 @@ impl MasterTimeApp {
                     consecutive_failures,
                     ..
                 } => {
+                    let _ = self.network_stats.record(Some(result.measurement), None);
                     self.delay_history.push(result.measurement.round_trip_delay);
                     self.state.apply_success(result);
                     self.recovery_notice = (consecutive_failures > 0).then(|| {
@@ -299,6 +336,7 @@ impl MasterTimeApp {
                     retry_delay,
                     ..
                 } => {
+                    let _ = self.network_stats.record(None, None);
                     self.state.record_error(error);
                     self.recovery_notice = Some(format!(
                         "Polling failed ({consecutive_failures} consecutive); retrying in {}s",
@@ -308,6 +346,19 @@ impl MasterTimeApp {
             }
         }
         self.events = Some(events);
+    }
+
+    fn show_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(WINDOW_TITLE);
+            ui.separator();
+            ui.label("Precision time utility");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    self.notify("Refresh requested; polling will update on its next cycle");
+                }
+            });
+        });
     }
 
     fn show_controls(&mut self, ui: &mut egui::Ui) {
@@ -356,21 +407,60 @@ impl MasterTimeApp {
     }
 
     fn show_time(&mut self, ui: &mut egui::Ui) {
+        let now = SystemTime::now();
         let view = self.presentation();
-        ui.heading(self.tr(Key::MasterTime));
-        ui.label(ClockDisplayModel::new(Some(SystemTime::now())).format());
-        ui.separator();
-        ui.heading(self.tr(Key::SyncStatus));
-        ui.label(format!("{} — {}", view.status.label, view.status.detail));
-        ui.separator();
-        ui.heading(self.tr(Key::Metrics));
-        self.metric_grid(ui, &view);
-        if let Some(summary) = view.history.summary {
-            ui.separator();
-            ui.label(format!("{}: {summary}", self.tr(Key::History)));
-        }
-        let chart = ChartModel::from_histories(self.state.history(), &self.delay_history);
-        ChartRenderer::default().show(ui, &chart);
+        ui.group(|ui| {
+            ui.heading("Current time");
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label("Local clock");
+                    ui.add_space(2.0);
+                    ui.heading(
+                        ClockDisplayModel::new(Some(now))
+                            .with_hour_format(self.hour_format)
+                            .with_display_mode(self.display_mode)
+                            .format(),
+                    );
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.label("UTC companion");
+                    ui.add_space(2.0);
+                    ui.label(
+                        ClockDisplayModel::new(Some(now))
+                            .with_timezone(TimeZone::Utc)
+                            .format(),
+                    );
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Format:");
+                ui.selectable_value(&mut self.hour_format, HourFormat::TwentyFourHour, "24-hour");
+                ui.selectable_value(&mut self.hour_format, HourFormat::TwelveHour, "12-hour");
+                ui.selectable_value(&mut self.display_mode, DisplayMode::Clock, "Clock");
+                ui.selectable_value(&mut self.display_mode, DisplayMode::UnixEpoch, "Unix epoch");
+            });
+        });
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.heading("Synchronization quality");
+            ui.label(format!("{} — {}", view.status.label, view.status.detail));
+            self.metric_grid(ui, &view);
+        });
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.heading("Packet details");
+            self.metric_grid(ui, &view);
+        });
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.heading("Offset history");
+            if let Some(summary) = view.history.summary.as_deref() {
+                ui.small(summary);
+            }
+            let chart = ChartModel::from_histories(self.state.history(), &self.delay_history);
+            ChartRenderer::default().show(ui, &chart);
+        });
         let measurement = self
             .state
             .latest_measurement()
@@ -455,57 +545,125 @@ impl MasterTimeApp {
     }
 
     fn show_server(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.tr(Key::ConfiguredServers));
-        let mut selected = self.state.config().active_server_index();
-        for (index, server) in self.state.config().servers().iter().enumerate() {
-            ui.radio_value(
-                &mut selected,
-                Some(index),
-                format!("{} ({})", server.name(), server.hostname()),
-            );
-        }
-        if selected != self.state.config().active_server_index() {
-            if self.server_manager.select(selected).is_ok() {
-                if let Err(error) = self.state.set_active_server(selected) {
-                    self.notify(error.to_string());
-                } else {
-                    self.sync_persistence();
-                }
+        ui.horizontal(|ui| {
+            ui.heading("Server profiles");
+            if ui.button("Add").clicked() {
+                self.edit_mode = ServerEditMode::Add;
+                self.edit_name.clear();
+                self.edit_hostname.clear();
             }
-        }
+        });
+        let mut selected = self.state.config().active_server_index();
         ui.separator();
         ui.label(format!(
-            "{} {}",
-            self.state.config().servers().len(),
-            self.tr(Key::ConfiguredProfiles)
+            "{} configured profiles",
+            self.server_manager.profiles().len()
         ));
-        ui.label(self.tr(Key::ServerProfilesValidated));
+        ui.small("Profiles are validated before they are saved.");
+        let mut action = None;
+        for (index, server) in self.server_manager.profiles().iter().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut selected, Some(index), "");
+                    ui.vertical(|ui| {
+                        ui.strong(server.name());
+                        ui.small(server.hostname());
+                    });
+                    if ui.button("Edit").clicked() {
+                        action = Some(("edit", index));
+                    }
+                    if ui.button("Remove").clicked() {
+                        action = Some(("remove", index));
+                    }
+                });
+            });
+        }
+        if selected != self.state.config().active_server_index() {
+            self.stop_polling();
+            if let Err(error) = self.server_manager.select(selected) {
+                self.notify(error.to_string());
+            } else {
+                self.state.set_active_server(selected).ok();
+                self.sync_persistence();
+            }
+        }
+        if let Some((kind, index)) = action {
+            if kind == "edit" {
+                let server = &self.server_manager.profiles()[index];
+                self.edit_name = server.name().to_owned();
+                self.edit_hostname = server.hostname().to_owned();
+                self.edit_mode = ServerEditMode::Edit(index);
+            } else if let Err(error) = self.server_manager.remove(index) {
+                self.notify(error.to_string());
+            } else {
+                self.sync_server_manager_state();
+            }
+        }
+        if !matches!(self.edit_mode, ServerEditMode::None) {
+            ui.separator();
+            ui.heading(if matches!(self.edit_mode, ServerEditMode::Add) {
+                "Add profile"
+            } else {
+                "Edit profile"
+            });
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(&mut self.edit_name);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Hostname");
+                ui.text_edit_singleline(&mut self.edit_hostname);
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Save profile").clicked() {
+                    let result = match self.edit_mode {
+                        ServerEditMode::Add => self
+                            .server_manager
+                            .add(self.edit_name.clone(), self.edit_hostname.clone())
+                            .map(|_| ()),
+                        ServerEditMode::Edit(index) => self.server_manager.edit(
+                            index,
+                            self.edit_name.clone(),
+                            self.edit_hostname.clone(),
+                        ),
+                        ServerEditMode::None => Ok(()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.edit_mode = ServerEditMode::None;
+                            self.sync_server_manager_state();
+                        }
+                        Err(error) => self.notify(error.to_string()),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.edit_mode = ServerEditMode::None;
+                }
+            });
+        }
     }
 
     fn show_network(&self, ui: &mut egui::Ui) {
-        ui.heading(self.tr(Key::Network));
-        ui.label(self.tr(Key::NtpMeasurementPollingStatus));
-        let view = self.presentation();
-        self.metric_grid(ui, &view);
-        ui.separator();
-        let measurement = self
-            .state
-            .latest_measurement()
-            .map(|result| result.measurement);
-        let stratum = self
-            .state
-            .latest_measurement()
-            .map_or(0, |result| result.header.stratum);
-        let disposition =
-            SyncPolicy::default().classify(measurement, self.state.health_status(), stratum);
-        ui.label(format!(
-            "Sync policy: {}",
-            match disposition {
-                SyncDisposition::EligibleForCorrection => "eligible for correction",
-                SyncDisposition::DisplayOnly => "display only",
-                SyncDisposition::Unsafe => "unsafe",
-            }
-        ));
+        ui.heading("Network");
+        ui.small("Rolling statistics from polling attempts");
+        let view = NetworkViewModel::new(&self.network_stats);
+        egui::Grid::new("network-statistics")
+            .striped(true)
+            .show(ui, |ui| {
+                for row in view.rows() {
+                    ui.label(row.label);
+                    ui.label(format!("{} {}", row.display_text, row.unit));
+                    if let Some(stats) = row.statistics {
+                        ui.small(format!(
+                            "mean {:.2} · min {:.2} · max {:.2}",
+                            stats.mean, stats.min, stats.max
+                        ));
+                    } else {
+                        ui.small("No samples yet");
+                    }
+                    ui.end_row();
+                }
+            });
     }
 
     fn show_calibration(&mut self, ui: &mut egui::Ui) {
@@ -547,7 +705,8 @@ impl MasterTimeApp {
     }
 
     fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.tr(Key::Diagnostics));
+        ui.heading("System");
+        ui.small("Available platform and application information. Values not provided by the platform are omitted.");
         let snapshot = self.diagnostic_snapshot();
         let stratum = self
             .state
@@ -811,22 +970,34 @@ impl MasterTimeApp {
 
 impl eframe::App for MasterTimeApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        context.set_visuals(match self.local_settings.theme() {
+            Theme::Light => egui::Visuals::light(),
+            Theme::Dark => egui::Visuals::dark(),
+            Theme::System => egui::Visuals::default(),
+        });
+        context.send_viewport_cmd(if self.local_settings.always_on_top() {
+            egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop)
+        } else {
+            egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal)
+        });
         self.receive_tray_commands(context);
         self.handle_keyboard(context);
         self.receive_events();
         context.request_repaint_after(Duration::from_millis(250));
         egui::CentralPanel::default().show(context, |ui| {
+            self.show_header(ui);
+            ui.add_space(8.0);
             self.show_controls(ui);
-            ui.separator();
-            ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
                 let tab_keys = [
                     Key::Time,
                     Key::Server,
                     Key::Network,
                     Key::Calibration,
                     Key::Diagnostics,
-                    Key::GlobalServers,
                     Key::Settings,
+                    Key::GlobalServers,
                 ];
                 for (index, key) in tab_keys.into_iter().enumerate() {
                     if ui
@@ -838,16 +1009,18 @@ impl eframe::App for MasterTimeApp {
                 }
             });
             ui.separator();
-            match self.tab {
-                0 => self.show_time(ui),
-                1 => self.show_server(ui),
-                2 => self.show_network(ui),
-                3 => self.show_calibration(ui),
-                4 => self.show_diagnostics(ui),
-                5 => self.show_global_servers(ui),
-                6 => self.show_settings(ui),
-                _ => unreachable!(),
-            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.tab {
+                    0 => self.show_time(ui),
+                    1 => self.show_server(ui),
+                    2 => self.show_network(ui),
+                    3 => self.show_calibration(ui),
+                    4 => self.show_diagnostics(ui),
+                    5 => self.show_settings(ui),
+                    6 => self.show_global_servers(ui),
+                    _ => unreachable!(),
+                });
         });
     }
 }
