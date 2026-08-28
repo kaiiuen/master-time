@@ -154,6 +154,11 @@ pub use accessibility::{
     AccessibilityPreferences, FocusTarget, KeyboardNavigation, NavigationKey, NavigationResult,
 };
 
+pub mod crash_diagnostics;
+
+pub use crash_diagnostics::{
+    CrashDiagnostics, DiagnosticEntry, Severity as CrashSeverity, SystemClock as CrashSystemClock,
+};
 
 pub use system_tray_backend::{
     SystemTrayBackend, TrayBackendAvailability, TrayBackendError, TrayBackendLifecycle,
