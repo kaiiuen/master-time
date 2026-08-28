@@ -20,6 +20,7 @@ pub mod health;
 pub use health::{HealthInput, HealthStatus, LeapIndicator, evaluate};
 
 pub mod config;
+pub mod diagnostics_view;
 
 pub use config::{
     AppConfig, ConfigError, PollingPreferences, ServerProfile as ConfigServerProfile,
@@ -39,6 +40,7 @@ pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingSta
 
 pub use server_manager::{ServerManager, ServerManagerError};
 
+pub use diagnostics_view::{DiagnosticsRow, DiagnosticsView};
 pub use history_view::{ChartModel, NormalizedPoint, ValueRange};
 pub use settings::{Language, LocalSettings, SettingsDraft, SettingsError, SettingsModel, Theme};
 
