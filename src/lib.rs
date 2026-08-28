@@ -1,5 +1,6 @@
 //! Testable building blocks for the Master Time application.
 
+pub mod history_view;
 pub mod measurement;
 pub mod ntp;
 pub mod server_manager;
@@ -36,6 +37,8 @@ pub mod state;
 pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingState};
 
 pub use server_manager::{ServerManager, ServerManagerError};
+
+pub use history_view::{ChartModel, NormalizedPoint, ValueRange};
 
 pub mod storage;
 
