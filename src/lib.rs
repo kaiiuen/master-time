@@ -133,3 +133,22 @@ pub use notifications::{
     Clock as NotificationClock, Notification, NotificationCenter, NotificationKind, Severity,
     SystemClock as NotificationSystemClock,
 };
+
+pub mod polling_failover;
+
+pub use polling_failover::{PollingOrchestrator, PollingTransition};
+
+pub mod network_view;
+
+pub use network_view::{MetricValue, NetworkMetric, NetworkMetricRow, NetworkViewModel};
+
+pub mod diagnostic_export;
+
+pub use diagnostic_export::{DiagnosticSnapshot, ExportError, ServerInfo};
+
+pub mod system_tray_backend;
+
+pub use system_tray_backend::{
+    SystemTrayBackend, TrayBackendAvailability, TrayBackendError, TrayBackendLifecycle,
+    command_for_menu_id,
+};
