@@ -2,6 +2,7 @@
 
 pub mod measurement;
 pub mod ntp;
+pub mod server_manager;
 pub mod servers;
 pub mod transport;
 
@@ -33,6 +34,8 @@ pub use polling::{PollEvent, PollingError, PollingWorker};
 pub mod state;
 
 pub use state::{AppState, ApplicationState, DEFAULT_HISTORY_CAPACITY, PollingState};
+
+pub use server_manager::{ServerManager, ServerManagerError};
 
 pub mod storage;
 
