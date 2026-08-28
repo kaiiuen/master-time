@@ -1,0 +1,9 @@
+LICENSE PLACEHOLDER — DO NOT DISTRIBUTE AS A FINAL LICENSE
+
+This file is not a license and does not grant permission to use, copy, modify,
+distribute, or redistribute Master Time or any part of this repository.
+
+Before releasing or distributing any source code, binary, or package, the project
+owner must decide the applicable license, add the complete license text to the
+repository, and replace this placeholder. If licensing or redistribution has not
+been explicitly approved, do not release or distribute the software.
