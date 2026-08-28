@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use crate::measurement::{Measurement, Statistics};
 use crate::network_stats::NetworkStatistics;
 use crate::{DiagnosticsSnapshot, HealthStatus};
@@ -313,13 +316,56 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ExportError> {
             .map_err(|source| io_error("write temporary export", temporary.clone(), source))?;
         file.sync_all()
             .map_err(|source| io_error("sync temporary export", temporary.clone(), source))?;
-        fs::rename(&temporary, path)
+        drop(file);
+        replace_file(&temporary, path)
             .map_err(|source| io_error("replace export", path.to_owned(), source))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    let temporary: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let replaced = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+#[cfg(windows)]
+const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
 }
 
 fn io_error(operation: &'static str, path: PathBuf, source: io::Error) -> ExportError {
@@ -487,6 +533,34 @@ mod tests {
         export.write_plain_text(&target).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), export.to_plain_text());
         let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn overwrites_existing_plain_text_and_json_exports() {
+        let text_target = path("overwrite.txt");
+        let json_target = path("overwrite.json");
+        let first = DiagnosticSnapshot::default();
+        let second = DiagnosticSnapshot {
+            diagnostics: DiagnosticsSnapshot {
+                uptime: Some(Duration::from_secs(42)),
+                ..DiagnosticsSnapshot::default()
+            },
+            ..DiagnosticSnapshot::default()
+        };
+
+        first.write_plain_text(&text_target).unwrap();
+        second.write_plain_text(&text_target).unwrap();
+        assert_eq!(
+            fs::read_to_string(&text_target).unwrap(),
+            second.to_plain_text()
+        );
+
+        first.write_json(&json_target).unwrap();
+        second.write_json(&json_target).unwrap();
+        assert_eq!(fs::read_to_string(&json_target).unwrap(), second.to_json());
+
+        let _ = fs::remove_file(text_target);
+        let _ = fs::remove_file(json_target);
     }
 
     #[test]
