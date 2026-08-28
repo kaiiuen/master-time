@@ -97,6 +97,7 @@ struct MasterTimeApp {
     edit_mode: ServerEditMode,
     edit_name: String,
     edit_hostname: String,
+    text_zoom: f32,
 }
 
 impl MasterTimeApp {
@@ -174,6 +175,7 @@ impl MasterTimeApp {
             edit_mode: ServerEditMode::None,
             edit_name: String::new(),
             edit_hostname: String::new(),
+            text_zoom: 1.0,
         }
     }
 
@@ -349,51 +351,149 @@ impl MasterTimeApp {
     }
 
     fn show_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(WINDOW_TITLE);
-            ui.separator();
-            ui.label("Precision time utility");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
-                    self.notify("Refresh requested; polling will update on its next cycle");
+        let now = SystemTime::now();
+        let local_clock = ClockDisplayModel::new(Some(now))
+            .with_hour_format(self.hour_format)
+            .with_display_mode(self.display_mode)
+            .format();
+        let utc_clock = ClockDisplayModel::new(Some(now))
+            .with_timezone(TimeZone::Utc)
+            .format();
+        let mut preferences_changed = false;
+
+        ui.group(|ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.heading(WINDOW_TITLE);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small(format!(
+                        "{} × {}",
+                        ui.ctx().screen_rect().width() as u32,
+                        ui.ctx().screen_rect().height() as u32
+                    ));
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(local_clock).size(36.0).strong());
+                ui.label(egui::RichText::new(format!("UTC {utc_clock}")).size(16.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(self.tr(Key::Theme));
+                            let mut theme = self.settings.draft().theme();
+                            egui::ComboBox::from_id_salt("header-theme")
+                                .selected_text(format!("{theme:?}"))
+                                .show_ui(ui, |ui| {
+                                    for value in [Theme::System, Theme::Light, Theme::Dark] {
+                                        if ui
+                                            .selectable_value(
+                                                &mut theme,
+                                                value,
+                                                format!("{value:?}"),
+                                            )
+                                            .changed()
+                                        {
+                                            self.settings.draft_mut().set_theme(value);
+                                            preferences_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(self.tr(Key::Language));
+                            let mut language = self.settings.draft().language();
+                            egui::ComboBox::from_id_salt("header-language")
+                                .selected_text(format!("{language:?}"))
+                                .show_ui(ui, |ui| {
+                                    for value in [
+                                        Language::English,
+                                        Language::SimplifiedChinese,
+                                        Language::TraditionalChinese,
+                                    ] {
+                                        if ui
+                                            .selectable_value(
+                                                &mut language,
+                                                value,
+                                                format!("{value:?}"),
+                                            )
+                                            .changed()
+                                        {
+                                            self.settings.draft_mut().set_language(value);
+                                            preferences_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Format");
+                            ui.selectable_value(
+                                &mut self.hour_format,
+                                HourFormat::TwentyFourHour,
+                                "24-hour",
+                            );
+                            ui.selectable_value(
+                                &mut self.hour_format,
+                                HourFormat::TwelveHour,
+                                "12-hour",
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Text size");
+                            for (zoom, label) in [(0.9, "Small"), (1.0, "Normal"), (1.15, "Large")]
+                            {
+                                ui.selectable_value(&mut self.text_zoom, zoom, label);
+                            }
+                        });
+                        let mut always_on_top = self.settings.draft().always_on_top();
+                        if ui
+                            .checkbox(&mut always_on_top, self.tr(Key::AlwaysOnTop))
+                            .changed()
+                        {
+                            self.settings.draft_mut().set_always_on_top(always_on_top);
+                            preferences_changed = true;
+                        }
+                    });
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let polling = self.worker.is_some();
+                if ui
+                    .add_enabled(!polling, egui::Button::new(self.tr(Key::StartPolling)))
+                    .clicked()
+                {
+                    self.start_polling();
+                }
+                if ui
+                    .add_enabled(polling, egui::Button::new(self.tr(Key::StopPolling)))
+                    .clicked()
+                {
+                    self.stop_polling();
+                }
+                ui.label(if polling {
+                    self.tr(Key::PollingActive)
+                } else {
+                    self.tr(Key::PollingStopped)
+                });
+                if let Some(server) = self.state.active_server() {
+                    ui.separator();
+                    ui.small(format!("{}: {}", self.tr(Key::Server), server.name()));
+                }
+                if let Some(error) = &self.control_error {
+                    ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
+                }
+                if let Some(notice) = &self.recovery_notice {
+                    ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notice);
+                }
+                if let Some(notification) = &self.notification {
+                    ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notification);
                 }
             });
         });
-    }
 
-    fn show_controls(&mut self, ui: &mut egui::Ui) {
-        let start_label = self.tr(Key::StartPolling);
-        let stop_label = self.tr(Key::StopPolling);
-        let active_label = self.tr(Key::PollingActive);
-        let stopped_label = self.tr(Key::PollingStopped);
-        ui.horizontal(|ui| {
-            let polling = self.worker.is_some();
-            if ui
-                .add_enabled(!polling, egui::Button::new(start_label))
-                .clicked()
-            {
-                self.start_polling();
-            }
-            if ui
-                .add_enabled(polling, egui::Button::new(stop_label))
-                .clicked()
-            {
-                self.stop_polling();
-            }
-            ui.label(if polling { active_label } else { stopped_label });
-            if let Some(server) = self.state.active_server() {
-                ui.separator();
-                ui.label(format!("Active: {}", server.name()));
-            }
-        });
-        if let Some(error) = &self.control_error {
-            ui.colored_label(egui::Color32::from_rgb(190, 60, 60), error);
-        }
-        if let Some(notice) = &self.recovery_notice {
-            ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notice);
-        }
-        if let Some(notification) = &self.notification {
-            ui.colored_label(egui::Color32::from_rgb(190, 150, 50), notification);
+        if preferences_changed {
+            self.notify("Preferences changed; apply them from Settings");
         }
     }
 
@@ -641,6 +741,64 @@ impl MasterTimeApp {
                 }
             });
         }
+
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.heading("NTP response details");
+            if let Some(result) = self.state.latest_measurement() {
+                let header = &result.header;
+                let measurement = result.measurement;
+                egui::Grid::new("server-response-details")
+                    .num_columns(2)
+                    .striped(true)
+                    .spacing([18.0, 6.0])
+                    .show(ui, |ui| {
+                        for (label, value) in [
+                            ("Resolved address", result.server.to_string()),
+                            ("NTP version", header.version.to_string()),
+                            ("Mode", header.mode.to_string()),
+                            ("Stratum", header.stratum.to_string()),
+                            ("Leap indicator", header.leap_indicator.to_string()),
+                            ("Poll exponent", header.poll_exponent.to_string()),
+                            ("Precision exponent", header.precision_exponent.to_string()),
+                            (
+                                "Root delay",
+                                format!("{:.3} ms", header.root_delay as f64 / 65.536),
+                            ),
+                            (
+                                "Root dispersion",
+                                format!("{:.3} ms", header.root_dispersion as f64 / 65.536),
+                            ),
+                            ("Reference ID", format!("{:02X?}", header.reference_id)),
+                            ("Offset", format!("{:+.3} ms", measurement.offset * 1000.0)),
+                            (
+                                "Round-trip delay",
+                                format!("{:.3} ms", measurement.round_trip_delay * 1000.0),
+                            ),
+                            (
+                                "Root distance",
+                                format!("{:.3} ms", measurement.root_distance * 1000.0),
+                            ),
+                            (
+                                "Originate (T1)",
+                                format!("{:?}", result.timestamps.originate),
+                            ),
+                            ("Receive (T2)", format!("{:?}", result.timestamps.receive)),
+                            ("Transmit (T3)", format!("{:?}", result.timestamps.transmit)),
+                            (
+                                "Destination (T4)",
+                                format!("{:?}", result.timestamps.destination),
+                            ),
+                        ] {
+                            ui.label(label);
+                            ui.monospace(value);
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                ui.weak("Waiting for the first NTP response");
+            }
+        });
     }
 
     fn show_network(&self, ui: &mut egui::Ui) {
@@ -970,6 +1128,7 @@ impl MasterTimeApp {
 
 impl eframe::App for MasterTimeApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        context.set_zoom_factor(self.text_zoom);
         context.set_visuals(match self.local_settings.theme() {
             Theme::Light => egui::Visuals::light(),
             Theme::Dark => egui::Visuals::dark(),
@@ -986,9 +1145,7 @@ impl eframe::App for MasterTimeApp {
         context.request_repaint_after(Duration::from_millis(250));
         egui::CentralPanel::default().show(context, |ui| {
             self.show_header(ui);
-            ui.add_space(8.0);
-            self.show_controls(ui);
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
                 let tab_keys = [
                     Key::Time,
@@ -1000,10 +1157,8 @@ impl eframe::App for MasterTimeApp {
                     Key::GlobalServers,
                 ];
                 for (index, key) in tab_keys.into_iter().enumerate() {
-                    if ui
-                        .selectable_label(self.tab == index, self.tr(key))
-                        .clicked()
-                    {
+                    let label = if index == 4 { "System" } else { self.tr(key) };
+                    if ui.selectable_label(self.tab == index, label).clicked() {
                         self.tab = index;
                     }
                 }
