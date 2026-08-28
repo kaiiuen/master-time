@@ -148,6 +148,13 @@ pub use diagnostic_export::{DiagnosticSnapshot, ExportError, ServerInfo};
 
 pub mod system_tray_backend;
 
+pub mod accessibility;
+
+pub use accessibility::{
+    AccessibilityPreferences, FocusTarget, KeyboardNavigation, NavigationKey, NavigationResult,
+};
+
+
 pub use system_tray_backend::{
     SystemTrayBackend, TrayBackendAvailability, TrayBackendError, TrayBackendLifecycle,
     command_for_menu_id,

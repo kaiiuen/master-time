@@ -11,6 +11,7 @@ use master_time::clock_display::ClockDisplayModel;
 use master_time::config::{
     AppConfig, MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, ServerProfile as ConfigServerProfile,
 };
+use master_time::diagnostic_export::{DiagnosticSnapshot, ServerInfo};
 use master_time::diagnostics_view::DiagnosticsView;
 use master_time::global_servers::GlobalServerCatalog;
 use master_time::history_view::ChartModel;
@@ -424,13 +425,13 @@ impl MasterTimeApp {
 
     fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.tr(Key::Diagnostics));
-        let snapshot = self.diagnostics.collect();
+        let snapshot = self.diagnostic_snapshot();
         let stratum = self
             .state
             .latest_measurement()
             .map(|result| result.header.stratum);
         let view = DiagnosticsView::new(
-            &snapshot,
+            &snapshot.diagnostics,
             self.state
                 .latest_measurement()
                 .map(|result| result.measurement),
@@ -444,6 +445,52 @@ impl MasterTimeApp {
                 ui.end_row();
             }
         });
+        ui.separator();
+        ui.label("Export diagnostics:");
+        ui.horizontal(|ui| {
+            if ui.button("Export plain text").clicked() {
+                self.export_diagnostics(&snapshot, false);
+            }
+            if ui.button("Export JSON").clicked() {
+                self.export_diagnostics(&snapshot, true);
+            }
+        });
+    }
+
+    fn diagnostic_snapshot(&mut self) -> DiagnosticSnapshot {
+        DiagnosticSnapshot {
+            diagnostics: self.diagnostics.collect(),
+            health: Some(self.state.health_status()),
+            measurement: self
+                .state
+                .latest_measurement()
+                .map(|result| result.measurement),
+            server: self
+                .state
+                .active_server()
+                .map(|server| ServerInfo::new(server.name(), server.hostname())),
+            network: None,
+        }
+    }
+
+    fn export_diagnostics(&mut self, snapshot: &DiagnosticSnapshot, json: bool) {
+        let (format, path) = if json {
+            ("JSON", PathBuf::from("master-time-diagnostics.json"))
+        } else {
+            ("plain-text", PathBuf::from("master-time-diagnostics.txt"))
+        };
+        let result = if json {
+            snapshot.write_json(&path)
+        } else {
+            snapshot.write_plain_text(&path)
+        };
+        match result {
+            Ok(()) => self.notify(format!(
+                "Diagnostics exported as {format} to {}",
+                path.display()
+            )),
+            Err(error) => self.notify(format!("Diagnostics export failed ({format}): {error}")),
+        }
     }
 
     fn show_global_servers(&mut self, ui: &mut egui::Ui) {
