@@ -68,3 +68,38 @@ pub use time_action::{
 pub mod localization;
 
 pub use localization::{English, Key, MISSING_TRANSLATION};
+
+pub mod persistence;
+
+pub use persistence::{Persistence, PersistenceError, PersistenceManager};
+
+pub mod chart;
+
+pub use chart::{
+    ChartRenderer, PlotGeometry, normalize_value, normalized_to_screen, plot_geometry, show,
+    zero_line_y,
+};
+
+pub mod translations;
+
+pub use translations::{
+    Catalog, Key as TranslationKey, Language as TranslationLanguage, TranslationCatalog,
+};
+
+pub mod recovery;
+
+pub use recovery::{DEFAULT_INITIAL_DELAY, DEFAULT_MAX_DELAY, RecoveryDecision, RetryPolicy};
+
+pub mod nts;
+
+pub use nts::{
+    EndpointSecurityMode, EndpointSecurityReport, EndpointSecurityStatus, NtsKeEndpoint,
+    NtsKeEndpointError, NtsTransport,
+};
+
+pub mod system_tray;
+
+pub use system_tray::{
+    HIDE_LABEL, MENU_ITEMS, QUIT_LABEL, SHOW_LABEL, START_POLLING_LABEL, STOP_POLLING_LABEL,
+    SystemTrayState, TrayAction, TrayCommand, TrayEvent, TrayMenuItem, menu_items,
+};
