@@ -19,14 +19,19 @@ use master_time::history_view::ChartModel;
 use master_time::persistence::PersistenceManager;
 use master_time::polling::{PollEvent, PollingWorker};
 
+use master_time::accessibility::{
+    FocusTarget, KeyboardNavigation, NavigationKey, NavigationResult,
+};
 use master_time::measurement::MeasurementHistory;
 use master_time::server_manager::ServerManager;
 use master_time::servers::{Category, ServerCatalog, ServerProfile as PollingServerProfile};
 use master_time::settings::{Language, LocalSettings, SettingsModel, Theme};
 use master_time::state::{ApplicationState, DEFAULT_HISTORY_CAPACITY};
 use master_time::sync_policy::{SyncDisposition, SyncPolicy};
+use master_time::system_tray::{SystemTrayState, TrayAction};
 use master_time::time_action::{CorrectionRequest, TimeAction};
 use master_time::translations::{Key, Language as TranslationLanguage, TranslationCatalog};
+use master_time::{PlatformTimeAdapter, SystemTrayBackend, TrayBackendAvailability};
 
 #[path = "ui.rs"]
 mod presentation;
@@ -69,7 +74,12 @@ struct MasterTimeApp {
 
     recovery_notice: Option<String>,
     notification: Option<String>,
+    diagnostic_export_location: Option<PathBuf>,
     time_action: TimeAction,
+    platform_time: PlatformTimeAdapter,
+    correction_opt_in: bool,
+    tray: SystemTrayBackend,
+    navigation: KeyboardNavigation,
 }
 
 impl MasterTimeApp {
@@ -106,6 +116,14 @@ impl MasterTimeApp {
         let local_settings = LocalSettings::default();
         let settings = SettingsModel::new(state.config(), local_settings);
         let interval_text = settings.draft().polling_interval().as_secs().to_string();
+        let mut tray = SystemTrayBackend::new(SystemTrayState::new());
+        let tray_error = tray
+            .initialize()
+            .err()
+            .map(|error| format!("System tray unavailable: {error:?}"));
+        if load_error.is_none() {
+            load_error = tray_error;
+        }
 
         Self {
             state,
@@ -127,7 +145,12 @@ impl MasterTimeApp {
 
             recovery_notice: None,
             notification: load_error,
+            diagnostic_export_location: None,
             time_action: TimeAction::default(),
+            platform_time: PlatformTimeAdapter::new(),
+            correction_opt_in: false,
+            tray,
+            navigation: KeyboardNavigation::new(7, 0),
         }
     }
 
@@ -185,6 +208,71 @@ impl MasterTimeApp {
         self.events = None;
         if let Err(error) = self.persistence.save_if_dirty() {
             self.notify(error.to_string());
+        }
+    }
+
+    fn receive_tray_commands(&mut self, context: &egui::Context) {
+        if SystemTrayBackend::availability() == TrayBackendAvailability::Unsupported {
+            return;
+        }
+        match self.tray.poll_native_commands() {
+            Ok(Some(action)) => match action {
+                TrayAction::Show => context.send_viewport_cmd(egui::ViewportCommand::Visible(true)),
+                TrayAction::Hide => {
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                TrayAction::StartPolling => self.start_polling(),
+                TrayAction::StopPolling => self.stop_polling(),
+                TrayAction::Quit => {
+                    self.stop_polling();
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                TrayAction::Noop => {}
+            },
+            Ok(None) => {}
+            Err(error) => self.notify(format!("System tray error: {error:?}")),
+        }
+    }
+
+    fn handle_keyboard(&mut self, context: &egui::Context) {
+        let events = if context.wants_keyboard_input() {
+            Vec::new()
+        } else {
+            context.input(|input| input.events.clone())
+        };
+        for event in events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let navigation_key = match key {
+                egui::Key::Tab if modifiers.shift => Some(NavigationKey::ShiftTab),
+                egui::Key::Tab => Some(NavigationKey::Tab),
+                egui::Key::ArrowLeft => Some(NavigationKey::Left),
+                egui::Key::ArrowRight => Some(NavigationKey::Right),
+                egui::Key::ArrowUp => Some(NavigationKey::Up),
+                egui::Key::ArrowDown => Some(NavigationKey::Down),
+                egui::Key::Home => Some(NavigationKey::Home),
+                egui::Key::End => Some(NavigationKey::End),
+                egui::Key::Enter => Some(NavigationKey::Enter),
+                egui::Key::Space => Some(NavigationKey::Space),
+                _ => None,
+            };
+            if let Some(navigation_key) = navigation_key {
+                if let NavigationResult::Activated(FocusTarget::Tab(tab)) =
+                    self.navigation.handle_key(navigation_key)
+                {
+                    self.tab = tab;
+                }
+            }
+        }
+        if self.navigation.active_tab() != Some(self.tab) {
+            let _ = self.navigation.focus(FocusTarget::Tab(self.tab));
         }
     }
 
@@ -307,6 +395,41 @@ impl MasterTimeApp {
                     "Correction approved for preview: {:+.3}s; no clock change was made",
                     approved.offset
                 )),
+                Err(error) => self.notify(error.to_string()),
+            }
+        }
+        if ui
+            .checkbox(
+                &mut self.correction_opt_in,
+                "Allow this session to change the Windows system clock",
+            )
+            .changed()
+        {
+            self.platform_time = if self.correction_opt_in {
+                PlatformTimeAdapter::with_explicit_opt_in()
+            } else {
+                PlatformTimeAdapter::new()
+            };
+        }
+        ui.label("Clock changes are never automatic and require the confirmation below.");
+        if !cfg!(windows) {
+            ui.label("System clock changes are unavailable on this platform.");
+        }
+        if ui
+            .add_enabled(
+                self.correction_opt_in && cfg!(windows),
+                egui::Button::new("Confirm and apply approved correction"),
+            )
+            .clicked()
+        {
+            match self.time_action.request_correction(request) {
+                Ok(approved) => match self.platform_time.apply(approved) {
+                    Ok(applied) => self.notify(format!(
+                        "System clock correction applied: {:+.3}s",
+                        applied.offset
+                    )),
+                    Err(error) => self.notify(error.to_string()),
+                },
                 Err(error) => self.notify(error.to_string()),
             }
         }
@@ -455,6 +578,9 @@ impl MasterTimeApp {
                 self.export_diagnostics(&snapshot, true);
             }
         });
+        if let Some(path) = &self.diagnostic_export_location {
+            ui.label(format!("Last export location: {}", path.display()));
+        }
     }
 
     fn diagnostic_snapshot(&mut self) -> DiagnosticSnapshot {
@@ -474,21 +600,28 @@ impl MasterTimeApp {
     }
 
     fn export_diagnostics(&mut self, snapshot: &DiagnosticSnapshot, json: bool) {
-        let (format, path) = if json {
-            ("JSON", PathBuf::from("master-time-diagnostics.json"))
+        let filename = if json {
+            "master-time-diagnostics.json"
         } else {
-            ("plain-text", PathBuf::from("master-time-diagnostics.txt"))
+            "master-time-diagnostics.txt"
         };
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(filename);
+        let format = if json { "JSON" } else { "plain-text" };
         let result = if json {
             snapshot.write_json(&path)
         } else {
             snapshot.write_plain_text(&path)
         };
         match result {
-            Ok(()) => self.notify(format!(
-                "Diagnostics exported as {format} to {}",
-                path.display()
-            )),
+            Ok(()) => {
+                self.diagnostic_export_location = Some(path.clone());
+                self.notify(format!(
+                    "Diagnostics exported as {format} to {}",
+                    path.display()
+                ));
+            }
             Err(error) => self.notify(format!("Diagnostics export failed ({format}): {error}")),
         }
     }
@@ -678,6 +811,8 @@ impl MasterTimeApp {
 
 impl eframe::App for MasterTimeApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.receive_tray_commands(context);
+        self.handle_keyboard(context);
         self.receive_events();
         context.request_repaint_after(Duration::from_millis(250));
         egui::CentralPanel::default().show(context, |ui| {
@@ -714,6 +849,13 @@ impl eframe::App for MasterTimeApp {
                 _ => unreachable!(),
             }
         });
+    }
+}
+
+impl Drop for MasterTimeApp {
+    fn drop(&mut self) {
+        self.stop_polling();
+        let _ = self.tray.shutdown();
     }
 }
 
