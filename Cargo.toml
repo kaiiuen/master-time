@@ -9,6 +9,9 @@ path = "src/lib.rs"
 
 [dependencies]
 eframe = "0.29"
+# No NTS dependency is declared: this crate does not claim NTS support until
+# a mature implementation covers RFC 8915 end to end. Plain UDP remains
+# provided by the existing transport without authentication.
 
 [profile.release]
 opt-level = 2

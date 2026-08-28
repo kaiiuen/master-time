@@ -4,6 +4,11 @@
 //! what the application can report today and leaves the wire protocol behind
 //! [`NtsTransport`], so an eventual implementation can be added without
 //! making an ordinary UDP exchange look like an NTS exchange.
+//!
+//! NTS is not just an NTP extension field: RFC 8915 requires a TLS-protected
+//! NTS-KE exchange, negotiated AEAD keys, cookies, authenticated NTP extension
+//! fields, and replay protection. None of those operations are implemented in
+//! this crate, and plain UDP must never be reported as an NTS result.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,12 +36,51 @@ impl EndpointSecurityMode {
     }
 }
 
+/// NTS protocol components deliberately not implemented by this crate.
+///
+/// Keeping these as named capabilities prevents a future caller from treating
+/// an NTS-shaped packet as secure when only some of the protocol was added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NtsUnsupportedFeature {
+    /// RFC 8915 NTS-KE over TLS 1.3, including certificate verification.
+    NtsKeyEstablishment,
+    /// Negotiated AEAD key handling for protected NTP packets.
+    PacketAead,
+    /// NTS cookies and their lifecycle across NTP exchanges.
+    Cookies,
+    /// NTS authenticator and other required NTP extension fields.
+    AuthenticatedExtensionFields,
+    /// Validation of unique request identifiers and replay resistance.
+    ReplayProtection,
+}
+
+/// Every RFC 8915 component that is absent from the current implementation.
+pub const NTS_UNSUPPORTED_FEATURES: &[NtsUnsupportedFeature] = &[
+    NtsUnsupportedFeature::NtsKeyEstablishment,
+    NtsUnsupportedFeature::PacketAead,
+    NtsUnsupportedFeature::Cookies,
+    NtsUnsupportedFeature::AuthenticatedExtensionFields,
+    NtsUnsupportedFeature::ReplayProtection,
+];
+
+impl fmt::Display for NtsUnsupportedFeature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NtsKeyEstablishment => "NTS-KE over TLS 1.3",
+            Self::PacketAead => "NTS packet AEAD protection",
+            Self::Cookies => "NTS cookies",
+            Self::AuthenticatedExtensionFields => "NTS authenticated extension fields",
+            Self::ReplayProtection => "NTS replay protection",
+        })
+    }
+}
+
 /// The currently reportable security capability of an endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointSecurityStatus {
     /// The endpoint can be queried using ordinary NTP over UDP only.
     PlainUdpSupported,
-    /// NTS is not implemented, so this policy cannot be fulfilled.
+    /// NTS is not implemented; see [`NTS_UNSUPPORTED_FEATURES`].
     NtsUnsupported,
     /// The endpoint string is invalid and cannot be used.
     InvalidEndpoint,
@@ -47,8 +91,20 @@ impl EndpointSecurityStatus {
         matches!(self, Self::PlainUdpSupported)
     }
 
+    /// Whether this status represents an authenticated NTS exchange.
+    ///
+    /// This remains false for every current status because this crate has no
+    /// NTS backend.
     pub const fn is_nts(self) -> bool {
         false
+    }
+
+    /// Return the exact RFC 8915 components missing from this implementation.
+    pub const fn unsupported_nts_features(self) -> &'static [NtsUnsupportedFeature] {
+        match self {
+            Self::NtsUnsupported => NTS_UNSUPPORTED_FEATURES,
+            Self::PlainUdpSupported | Self::InvalidEndpoint => &[],
+        }
     }
 }
 
@@ -56,7 +112,9 @@ impl fmt::Display for EndpointSecurityStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PlainUdpSupported => f.write_str("supported over plain UDP; NTS is not enabled"),
-            Self::NtsUnsupported => f.write_str("unsupported: NTS is not implemented"),
+            Self::NtsUnsupported => f.write_str(
+                "unsupported: NTS-KE, packet protection, cookies, authenticated extension fields, and replay protection are not implemented",
+            ),
             Self::InvalidEndpoint => f.write_str("unsupported: invalid NTS-KE endpoint"),
         }
     }
@@ -233,10 +291,10 @@ mod tests {
             EndpointSecurityMode::NtsRequired,
             EndpointSecurityMode::NtsPreferred,
         ] {
-            assert_eq!(
-                EndpointSecurityReport::for_mode(mode).status,
-                EndpointSecurityStatus::NtsUnsupported
-            );
+            let status = EndpointSecurityReport::for_mode(mode).status;
+            assert_eq!(status, EndpointSecurityStatus::NtsUnsupported);
+            assert!(!status.is_nts());
+            assert_eq!(status.unsupported_nts_features(), NTS_UNSUPPORTED_FEATURES);
         }
     }
 

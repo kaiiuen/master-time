@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::nts::{
     EndpointSecurityMode, EndpointSecurityReport, EndpointSecurityStatus, NtsKeEndpoint,
+    NtsUnsupportedFeature,
 };
 
 /// Default upper bound that a future NTS-KE exchange may use.
@@ -65,6 +66,11 @@ impl NtsTransportConfig {
     pub fn security_report(&self) -> EndpointSecurityReport {
         EndpointSecurityReport::for_mode(self.mode)
     }
+
+    /// List the exact RFC 8915 components unavailable to this boundary.
+    pub fn unsupported_nts_features(&self) -> &'static [NtsUnsupportedFeature] {
+        self.security_report().status.unsupported_nts_features()
+    }
 }
 
 /// Configuration errors that can be identified before any network operation.
@@ -87,7 +93,8 @@ impl std::error::Error for NtsTransportConfigError {}
 /// Why this boundary cannot execute a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NtsTransportError {
-    /// NTS-KE and protected NTP are intentionally not implemented here.
+    /// NTS-KE, AEAD packet protection, cookies, authenticated extension
+    /// fields, and replay protection are intentionally not implemented here.
     NotImplemented,
     /// The selected policy belongs to another transport boundary.
     Unsupported(UnsupportedNtsPolicy),
@@ -141,7 +148,8 @@ impl NtsTransportBoundary {
     }
 
     /// Refuse execution explicitly; this method never performs plain UDP or
-    /// unauthenticated NTS-like traffic.
+    /// unauthenticated NTS-like traffic. In particular, it does not send the
+    /// request to the NTS-KE endpoint or silently downgrade an NTS policy.
     pub fn execute(
         &self,
         config: &NtsTransportConfig,
@@ -217,8 +225,14 @@ mod tests {
             EndpointSecurityMode::NtsRequired,
             EndpointSecurityMode::NtsPreferred,
         ] {
-            let result = NtsTransportBoundary::new().execute(&config(mode), &[0; 48]);
+            let configuration = config(mode);
+            let result = NtsTransportBoundary::new().execute(&configuration, &[0; 48]);
             assert_eq!(result, Err(NtsTransportError::NotImplemented));
+            assert_eq!(
+                configuration.unsupported_nts_features().len(),
+                5,
+                "NTS must not be reported as partially implemented"
+            );
         }
     }
 }
