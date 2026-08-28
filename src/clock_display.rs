@@ -4,7 +4,7 @@
 //! select [`TimeZone::Local`] should therefore provide the local UTC offset
 //! (including DST, if applicable) with [`ClockDisplayModel::with_local_offset`].
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const UNAVAILABLE: &str = "<unavailable>";
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -208,6 +208,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn timestamp(seconds: u64) -> SystemTime {
